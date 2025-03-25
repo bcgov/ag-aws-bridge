@@ -92,3 +92,28 @@ resource "aws_iam_role_policy_attachment" "ssm_policy" {
   role       = aws_iam_role.lambda2_exec_role.name
   policy_arn = aws_iam_policy.ssm_access_policy.arn
 }
+
+
+# Create the Lambda function
+resource "aws_lambda_function" "lambda_case_id_validation" {
+  filename         = data.archive_file.lambda_zip.output_path
+  function_name    = "lambda_case_id_validation"
+  role             = aws_iam_role.lambda2_exec_role.arn
+  handler          = "index.handler"
+  runtime          = "nodejs18.x"
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  memory_size = 128
+  timeout     = 3
+
+  environment {
+    variables = {
+      PARAM_PATH = "/example/parameter"
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_policy,
+    aws_iam_role_policy_attachment.ssm_policy
+  ]
+}
