@@ -87,8 +87,8 @@ class LambdaStructuredLogger:
         # Add optional fields only if they have values
         optional_fields = {
             "job_id": job_id,
-            "case_metadata": case_metadata,
-            "evidence_metadata": evidence_metadata,
+            "case_metadata": axon_case_metadata,
+            "evidence_metadata": axon_evidence_metadata,
             "api_metadata": api_metadata,
             "retry_context": retry_context,
             "error_details": error_details,
@@ -221,21 +221,22 @@ class LambdaStructuredLogger:
                 job_id=job_id,
                 custom_metadata={"missing_parameters": invalid_parameters}
             )
-            
+    
+        """
+        Log SSM SecureString parameter storage results (after Authentication function stored the token)
+    
+        Args:
+            parameter_name: SSM parameter name where the secure string was stored
+            response_time_ms: Time taken to store the parameter
+            parameter_version: Version number returned by SSM (if available)
+            overwrite: Whether an existing parameter was overwritten
+            job_id: Unique identifier for the workflow
+        """
     def log_ssm_secure_string_store(self, parameter_name: str, response_time_ms: float,
                                parameter_version: Optional[int] = None,
                                overwrite: bool = False, job_id: Optional[str] = None, **kwargs):
-    """
-    Log SSM SecureString parameter storage results (after Authentication function stored the token)
-    
-    Args:
-        parameter_name: SSM parameter name where the secure string was stored
-        response_time_ms: Time taken to store the parameter
-        parameter_version: Version number returned by SSM (if available)
-        overwrite: Whether an existing parameter was overwritten
-        job_id: Unique identifier for the workflow
-    """
-    self.log_success(
+  
+        self.log_success(
         event="ssm_secure_string_store",
         message=f"Bearer token stored in SSM parameter {parameter_name}",
         job_id=job_id,
