@@ -1,0 +1,106 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "SSMParameterAccess",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters"
+            ],
+            "Resource": [
+                "arn:aws:ssm:ca-central-1:*:parameter/dev-test/bridge/*",
+                "arn:aws:ssm:ca-central-1:*:parameter/dev-test/axon/*"
+            ]
+        },
+        {
+            "Sid": "VPCAccess",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:CreateNetworkInterface",
+                "ec2:DescribeNetworkInterfaces",
+                "ec2:DeleteNetworkInterface",
+                "ec2:AttachNetworkInterface", 
+                "ec2:DetachNetworkInterface"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "SQSReceiveFromEvidenceQueues",
+            "Effect": "Allow",
+            "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes"
+            ],
+            "Resource": [
+                "arn:aws:sqs:ca-central-1:*:q-evidence-download.fifo",
+                "arn:aws:sqs:ca-central-1:*:q-evidence-download-oversize.fifo"
+            ]
+        },
+        {
+            "Sid": "SQSSendToMetadataUpdate",
+            "Effect": "Allow",
+            "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueUrl"
+            ],
+            "Resource": [
+                "arn:aws:sqs:ca-central-1:*:q-case-metadata-update.fifo"
+            ]
+        },
+        {
+            "Sid": "S3EvidenceStorage",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject", 
+                "s3:DeleteObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::your-evidence-bucket/*"
+            ]
+        },
+        {
+            "Sid": "FargateForOversizeFiles",
+            "Effect": "Allow",
+            "Action": [
+                "ecs:RunTask",
+                "ecs:DescribeTasks",
+                "ecs:StopTask"
+            ],
+            "Resource": [
+                "arn:aws:ecs:ca-central-1:*:task-definition/evidence-downloader-*",
+                "arn:aws:ecs:ca-central-1:*:task/*"
+            ]
+        },
+        {
+            "Sid": "IAMPassRoleForFargate",
+            "Effect": "Allow",
+            "Action": [
+                "iam:PassRole"
+            ],
+            "Resource": [
+                "arn:aws:iam::*:role/evidence-downloader-fargate-role"
+            ]
+        },
+        {
+            "Sid": "KMSAccess",
+            "Effect": "Allow",
+            "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:GenerateDataKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": [
+                        "sqs.ca-central-1.amazonaws.com",
+                        "s3.ca-central-1.amazonaws.com"
+                    ]
+                }
+            }
+        }
+    ]
+}

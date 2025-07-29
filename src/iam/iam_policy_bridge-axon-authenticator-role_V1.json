@@ -1,0 +1,41 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "SSMParameterRead",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters"
+            ],
+            "Resource": [
+                "arn:aws:ssm:ca-central-1:*:parameter/dev-test/axon/*"
+            ]
+        },
+        {
+            "Sid": "SSMParameterWrite",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:PutParameter"
+            ],
+            "Resource": [
+                "arn:aws:ssm:ca-central-1:*:parameter/app/api/bearer_token"
+            ]
+        },
+        {
+            "Sid": "KMSForSSM",
+            "Effect": "Allow",
+            "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:GenerateDataKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": "ssm.ca-central-1.amazonaws.com"
+                }
+            }
+        }
+    ]
+}
