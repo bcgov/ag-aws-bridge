@@ -19,7 +19,7 @@
                 "ssm:PutParameter"
             ],
             "Resource": [
-                "arn:aws:ssm:ca-central-1:*:parameter/app/api/bearer_token"
+                "arn:aws:ssm:ca-central-1:*:parameter/dev-test/axon/api/bearer"
             ]
         },
         {
