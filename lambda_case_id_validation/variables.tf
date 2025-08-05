@@ -35,7 +35,7 @@ variable "env_full" {
 variable "dems_isl_api_key" {
   type        = string
   description = "DEMS ISL API access key"
-  default     = "7N6EYCR6TD88O7MV1VXQNBP0K"
+  default     = ""
 }
 
 variable "dems_isl_api_url" {
