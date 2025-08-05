@@ -4,7 +4,7 @@
     "ActivateGateway": [
       {
         "input": {
-          "ActivationKey": "29AV1-3OFV9-VVIUB-NKT0I-LRO6V",
+          "ActivationKey": "",
           "GatewayName": "My_Gateway",
           "GatewayRegion": "us-east-1",
           "GatewayTimezone": "GMT-12:00",
