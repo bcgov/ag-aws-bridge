@@ -1,0 +1,80 @@
+name: Deploy SAM Application
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION: ca-central-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+
+    - name: Setup SAM CLI
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Cache SAM build
+      uses: actions/cache@v3
+      with:
+        path: .aws-sam
+        key: ${{ runner.os }}-sam-${{ hashFiles('**/template.yaml') }}-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-sam-
+
+    - name: SAM Build
+      run: sam build --use-container
+
+    - name: SAM Deploy (Development)
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        sam deploy \
+          --stack-name hello-world-lambda-dev \
+          --s3-bucket ${{ secrets.SAM_S3_BUCKET }} \
+          --s3-prefix hello-world-lambda-dev \
+          --region ${{ env.AWS_REGION }} \
+          --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --parameter-overrides Environment=dev
+
+    - name: SAM Deploy (Production)
+      if: github.ref == 'refs/heads/main'
+      run: |
+        sam deploy \
+          --stack-name hello-world-lambda-prod \
+          --s3-bucket ${{ secrets.SAM_S3_BUCKET }} \
+          --s3-prefix hello-world-lambda-prod \
+          --region ${{ env.AWS_REGION }} \
+          --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --parameter-overrides Environment=prod
+
+    - name: Run Tests (Optional)
+      run: |
+        # Add your test commands here if you have tests
+        # python -m pytest tests/
+        echo "Tests would run here"
