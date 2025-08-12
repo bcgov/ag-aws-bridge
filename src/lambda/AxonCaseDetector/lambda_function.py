@@ -13,8 +13,11 @@ def lambda_handler(event, context):
     ssm_client = boto3.client('ssm')
     
     # Initialize database manager
+    # Get environment stage from environment variable
     env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+
     db_manager = get_db_manager(env_param=env_stage)
+    db_config =  db_manager.get_config_from_ssm()
 
     # Log the start of the function
     logger.log_start(
@@ -22,8 +25,7 @@ def lambda_handler(event, context):
         job_id=context.aws_request_id
     )
     
-    # Get environment stage from environment variable
-    env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+   
     logger.info(f"Loading configuration for environment: {env_stage}")
             
     
@@ -37,7 +39,8 @@ def lambda_handler(event, context):
             f'/{env_stage}/axon/api/bearer',
             f'/{env_stage}/axon/api/client_secret',
             f'/{env_stage}/axon/api/client_id',
-            f'/{env_stage}/axon/api/case_detector_interval_mins'
+            f'/{env_stage}/axon/api/case_detector_interval_mins',
+            f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found'
         ]
         
         # Retrieve multiple parameters at once
@@ -57,15 +60,15 @@ def lambda_handler(event, context):
         
         # Add API method
         parameters["method"] = "POST"
-        api_url = parameters['/dev-test/axon/api/authentication_url']
+        api_url = parameters['f/{env_stage}/axon/api/authentication_url']
 
         
         # Get API bearer token
         try:
            payload = {
-                "client_id" : parameters["/dev-test/axon/api/client_id"],
+                "client_id" : parameters["f/{env_stage}/axon/api/client_id"],
                 "grant_type" : "client_credentials",
-                "client_secret" : parameters["/dev-test/axon/api/client_secret"]
+                "client_secret" : parameters["f/{env_stage}/axon/api/client_secret"]
            }
             response = requests.post(api_url, data=payload)
             response.raise_for_status()  # Raise an exception for 4xx/5xx status codes
@@ -76,7 +79,7 @@ def lambda_handler(event, context):
                 details={"status_code": response.status_code, "url": api_url}
             )
             data = response.json() 
-            parameters["/dev-test/axon/api/bearer"] = data.get("access_token")
+            parameters["f/{env_stage}/axon/api/bearer"] = data.get("access_token")
 
         except requests.exceptions.RequestException as e:
             logger.log_error(
@@ -93,17 +96,17 @@ def lambda_handler(event, context):
         
         # Prepare headers for the GET request (assuming bearer token authentication)
         headers = {
-            'Authorization': f"Bearer {parameters['/dev-test/axon/api/bearer']}",
+            'Authorization': f"Bearer {parameters['f/{env_stage}/axon/api/bearer']}",
             'Content-Type': 'application/json'
         }
         # Make the GET request to the API endpoint
-        api_url = parameters['/dev-test/axon/api/get_cases_url_filter_path']
+        api_url = parameters['f/{env_stage}/axon/api/get_cases_url_filter_path']
 
         # Get current UTC time
         current_utc_time = datetime.now(timezone.utc)
 
         # Get interval to use
-        case_detector_interval_mins = parameters["/dev-test/axon/api/case_detector_interval_mins"]
+        case_detector_interval_mins = parameters["f/{env_stage}/axon/api/case_detector_interval_mins"]
 
         # Substract 5 minutes to get second UTC time
         fivemins_past = current_utc_time - timedelta(minutes=case_detector_interval_mins)
@@ -161,9 +164,51 @@ def lambda_handler(event, context):
                         owner = attributes.get("owner", {})
                         owner_id = owner.get("id")
                         owner_agency = owner.get("relationships", {}).get("agency", {}).get("data", {}).get("id")
-
+                        sourceCaseLastModified = attributes.get("lastModified")
                         # Extract caseSharedFrom (list)
                         case_shared_from = attributes.get("caseSharedFrom", [])
+
+                        queryParams = {"job_id" : context.aws_request_id, "job_created_utc" : current_utc_time, 
+                        "source_agency" : case_shared_from, "source_case_id" : item_id,
+                        "source_system" : "Axon",
+                         "source_case_title" : title, "last_modified_process": "lambda: axon case detector", "source_case_last_modified_utc" : sourceCaseLastModified ,
+                          "last_modified_utc" : current_utc_time}
+                        
+                        db_manager.create_evidence_transfer_job(job_data=queryParams)
+                
+                       
+                metaData = {
+                    "job_id" : context.aws_request_id,
+
+                }
+                
+                logger.log_database_update_jobs(job_id=context.aws_request_id,status=status, rows_affected=count, response_time=response.elapsed.total_seconds())
+
+                # Send SQS Message 
+                queue_url = parameter_names["f/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found"]
+                try:
+                    # Send a message to the queue
+                    response = sqs.send_message(
+                    QueueUrl=queue_url,
+                    MessageBody='Cases detected, details stored',
+                    DelaySeconds=5, # Deliver after 5 seconds
+                    MessageAttributes={
+                    'Job_id' : {
+                        'DataType'  : 'Number',
+                        'Value'     : context.aws_request_id
+                    },
+                    'Source_case_title' :{
+                        'DataType'  : 'String',
+                        'Value'     : ''
+                    }
+                    
+                    }
+                    )
+                    print(f"Message sent successfully. Message ID: {response['MessageId']}")
+
+                except Exception as e:
+                    print(f"Error sending message: {e}")
+
                 result = {"statusCode": 200, "body": "Success calling API, at least 1 result found."}
                 return result
             else:
