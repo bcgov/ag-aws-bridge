@@ -47,6 +47,29 @@ jobs:
         aws sts get-caller-identity
         echo "AWS Region: $AWS_REGION"
 
+    - name: Check and handle failed stack state (Dev)
+      if: github.ref == 'refs/heads/develop'
+      run: |
+        STACK_STATUS=$(aws cloudformation describe-stacks \
+          --stack-name hello-world-lambda-dev \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Stacks[0].StackStatus' \
+          --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+        
+        if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
+          echo "Stack is in ROLLBACK_COMPLETE state. Deleting it first..."
+          aws cloudformation delete-stack \
+            --stack-name hello-world-lambda-dev \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name hello-world-lambda-dev \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Stack deleted successfully"
+        fi
+
     - name: Cache SAM build
       uses: actions/cache@v3
       with:
