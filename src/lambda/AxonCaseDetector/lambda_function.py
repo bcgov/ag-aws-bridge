@@ -83,7 +83,7 @@ def lambda_handler(event, context):
                 "client_secret" : parameters["f/{env_stage}/axon/api/client_secret"]
             }
             response = http.request('POST', api_url, 
-            body=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'},timeout=urllib3.Timeout(connect=5, read=10)
+            body=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'},timeout=urllib3.Timeout(connect=5, read=10))
           
             # Log success and return the response
             logger.log_success(
@@ -134,8 +134,8 @@ def lambda_handler(event, context):
             params = {
                 "filter": filter_string
             }
-             start = time.perf_counter()
-            response = http.request('GET', api_url, fields=params,timeout=urllib3.Timeout(connect=5, read=10)
+            start = time.perf_counter()
+            response = http.request('GET', api_url, fields=params,timeout=urllib3.Timeout(connect=5, read=10))
            
             if response.status >= 400: raise Exception(f"HTTP error: {response.status}")
 
@@ -225,7 +225,7 @@ def lambda_handler(event, context):
                 return result
             else:
                 # Get response time
-                response_time = response.elapsed.total_seconds()
+                #response_time = response.elapsed.total_seconds()
             
                 logger.log_api_call(event="call to Axon Get Cases, no new cases found", method="POST", status_code= response.status_code, 
                 response_time = response_time,   job_id=context.aws_request_id)
