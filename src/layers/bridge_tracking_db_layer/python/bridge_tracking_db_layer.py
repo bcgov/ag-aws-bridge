@@ -17,12 +17,12 @@ logger.setLevel(logging.INFO)
 class DatabaseManager:
     """Database manager with connection pooling for evidence transfer system."""
     
-    def __init__(self, dev_stage=None):
+    def __init__(self, env_param=None):
         self.connection_pool = None
         self.ssm_client = None
         self._db_config = None
         self._queue_config = None
-        self.env_stage = dev_stage
+        self.env_stage = env_param
         self._initialize_pool()
     
     def _get_ssm_client(self):
@@ -621,11 +621,11 @@ class DatabaseManager:
 # Singleton instance
 _db_manager = None
 
-def get_db_manager(env_param=None) -> DatabaseManager:
+def get_db_manager(env_param_in=None) -> DatabaseManager:
     """Get the singleton database manager instance."""
     global _db_manager
     if _db_manager is None:
-        _db_manager = DatabaseManager(env_stage=env_param)
+        _db_manager = DatabaseManager(env_param=env_param_in)
     return _db_manager
 
 

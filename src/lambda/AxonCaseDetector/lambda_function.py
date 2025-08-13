@@ -1,9 +1,15 @@
 import json
 import boto3
-import requests
+#import requests
+import urllib3
+import os 
+import time
+
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from datetime import datetime, timezone
 from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
+from datetime import timedelta
+
 
 def lambda_handler(event, context):
     # Initialize the logger
@@ -12,12 +18,17 @@ def lambda_handler(event, context):
     # Initialize AWS SSM client
     ssm_client = boto3.client('ssm')
     
+    sqs = boto3.client('sqs')
+
     # Initialize database manager
     # Get environment stage from environment variable
     env_stage = os.environ.get('ENV_STAGE', 'dev-test')
 
-    db_manager = get_db_manager(env_param=env_stage)
-    db_config =  db_manager.get_config_from_ssm()
+    db_manager = get_db_manager(env_param_in=env_stage)
+    #db_config =  db_manager.get_config_from_ssm()
+
+    #initialize HTTP Connection Pool
+    http = urllib3.PoolManager()
 
     # Log the start of the function
     logger.log_start(
@@ -60,28 +71,32 @@ def lambda_handler(event, context):
         
         # Add API method
         parameters["method"] = "POST"
-        api_url = parameters['f/{env_stage}/axon/api/authentication_url']
+        api_url = parameters[f'/{env_stage}/axon/api/authentication_url']
+
 
         
         # Get API bearer token
         try:
-           payload = {
+            payload = {
                 "client_id" : parameters["f/{env_stage}/axon/api/client_id"],
                 "grant_type" : "client_credentials",
                 "client_secret" : parameters["f/{env_stage}/axon/api/client_secret"]
-           }
-            response = requests.post(api_url, data=payload)
-            response.raise_for_status()  # Raise an exception for 4xx/5xx status codes
-
+            }
+            response = http.request('POST', api_url, 
+            body=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'},timeout=urllib3.Timeout(connect=5, read=10)
+          
             # Log success and return the response
             logger.log_success(
                 event="api_call",
                 details={"status_code": response.status_code, "url": api_url}
             )
             data = response.json() 
-            parameters["f/{env_stage}/axon/api/bearer"] = data.get("access_token")
+            #parameters["f/{env_stage}/axon/api/bearer"] = data.get("access_token")
+            parameters[f'/{env_stage}/axon/api/bearer'] = data.get("access_token")
 
-        except requests.exceptions.RequestException as e:
+
+
+        except urllib3.exceptions.HTTPError as e:
             logger.log_error(
                 event="api_call_failed",
                 details={"error": str(e), "url": api_url}
@@ -106,25 +121,28 @@ def lambda_handler(event, context):
         current_utc_time = datetime.now(timezone.utc)
 
         # Get interval to use
-        case_detector_interval_mins = parameters["f/{env_stage}/axon/api/case_detector_interval_mins"]
+        case_detector_interval_mins = int(parameters[f'/{env_stage}/axon/api/case_detector_interval_mins'])
+
 
         # Substract 5 minutes to get second UTC time
         fivemins_past = current_utc_time - timedelta(minutes=case_detector_interval_mins)
         
         # make filter string
-        filter_string = f"createdOn in {fivemins_past} to {current_utc_time}"
+        filter_string = f"createdOn in {fivemins_past.isoformat()} to {current_utc_time.isoformat()}"
 
         try:
             params = {
                 "filter": filter_string
             }
-            response = requests.get(api_url, headers=headers,params=params, timeout=10)
-            response.raise_for_status()  # Raise an exception for 4xx/5xx status codes
-            
+             start = time.perf_counter()
+            response = http.request('GET', api_url, fields=params,timeout=urllib3.Timeout(connect=5, read=10)
+           
+            if response.status >= 400: raise Exception(f"HTTP error: {response.status}")
+
             # Get response time
-            response_time = response.elapsed.total_seconds()
-            
-            logger.log_api_call(event="call to Axon Get Cases", method="POST", status_code= response.status_code, 
+            response_time = time.perf_counter() - start
+
+            logger.log_api_call(event="call to Axon Get Cases", method="GET", status_code= response.status_code, 
             response_time = response_time,   job_id=context.aws_request_id)
 
             # Log success and return the response
@@ -135,7 +153,7 @@ def lambda_handler(event, context):
 
             if response.status_code == 200:
                 # Parse JSON response
-                json_data = response.json()
+                json_data = json.loads(response.data().decode('utf-8'))
                  # Extract top-level meta information
                 meta = json_data.get("meta", {})
                 offset = meta.get("offset")
@@ -147,7 +165,7 @@ def lambda_handler(event, context):
                      # Get response time
                     response_time = response.elapsed.total_seconds()
             
-                    logger.log_api_call(event="call to Axon Get Cases successful. Found at least 1 case", method="POST", status_code= response.status_code, 
+                    logger.log_api_call(event="call to Axon Get Cases successful. Found at least 1 case", method="GET", status_code= response.status_code, 
                     response_time = response_time,   job_id=context.aws_request_id)
 
                     for item in data:
@@ -175,17 +193,12 @@ def lambda_handler(event, context):
                           "last_modified_utc" : current_utc_time}
                         
                         db_manager.create_evidence_transfer_job(job_data=queryParams)
-                
-                       
-                metaData = {
-                    "job_id" : context.aws_request_id,
 
-                }
-                
                 logger.log_database_update_jobs(job_id=context.aws_request_id,status=status, rows_affected=count, response_time=response.elapsed.total_seconds())
 
                 # Send SQS Message 
-                queue_url = parameter_names["f/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found"]
+                queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
+
                 try:
                     # Send a message to the queue
                     response = sqs.send_message(
@@ -201,7 +214,6 @@ def lambda_handler(event, context):
                         'DataType'  : 'String',
                         'Value'     : ''
                     }
-                    
                     }
                     )
                     print(f"Message sent successfully. Message ID: {response['MessageId']}")
@@ -220,7 +232,7 @@ def lambda_handler(event, context):
                 result = {"statusCode": 200, "body": "Success calling API, no results found."}
                 return result
             
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.log_error(
                 event="api_call_failed",
                 details={"error": str(e), "url": api_url}
