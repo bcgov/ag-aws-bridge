@@ -1,4 +1,5 @@
 import json
+from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 
 # import requests
 
@@ -32,6 +33,15 @@ def lambda_handler(event, context):
     #     print(e)
 
     #     raise e
+    
+    # Initialize the logger
+    logger = LambdaStructuredLogger()
+    
+    # Log the start of the function
+    logger.log_start(
+        event="simple_lambda_execution",
+        job_id=context.aws_request_id
+    )
 
     return {
         "statusCode": 200,

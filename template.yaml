@@ -17,6 +17,16 @@ Globals:
   Api:
     TracingEnabled: true
 Resources:
+  # Logger layer
+  LambdaStructuredLoggerLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: lambda-structured-logger
+      ContentUri: src/layers/lambda_structured_logger/
+      CompatibleRuntimes:
+        - python3.11
+        - python3.13
+      RetentionPolicy: Retain
   HelloWorldFunction:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
@@ -31,6 +41,8 @@ Resources:
           Properties:
             Path: /hello
             Method: get
+      Layers:
+        - !Ref LambdaStructuredLoggerLayer
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
