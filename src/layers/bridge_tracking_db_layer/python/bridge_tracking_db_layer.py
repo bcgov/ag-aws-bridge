@@ -1,6 +1,5 @@
 # python/bridge_tracking_db_layer.py - Lambda Layer Database Module
-import os
-import json
+
 import logging
 import boto3
 from datetime import datetime
@@ -18,11 +17,12 @@ logger.setLevel(logging.INFO)
 class DatabaseManager:
     """Database manager with connection pooling for evidence transfer system."""
     
-    def __init__(self):
+    def __init__(self, env_param=None):
         self.connection_pool = None
         self.ssm_client = None
         self._db_config = None
         self._queue_config = None
+        self.env_stage = env_param
         self._initialize_pool()
     
     def _get_ssm_client(self):
@@ -38,19 +38,18 @@ class DatabaseManager:
         
         try:
             ssm = self._get_ssm_client()
-            
-        # Get environment stage from environment variable
-        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-        logger.info(f"Loading configuration for environment: {env_stage}")
+            # Get environment stage from environment variable
+            #env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+            logger.info(f"Loading configuration for environment: {self.env_stage}")
             
             # Define SSM parameter paths          
             parameter_paths = {
-                'host': f'/{env_stage}/bridge/tracking-db/host',
-                'name': f'/{env_stage}/bridge/tracking-db/name',
-                'username': f'/{env_stage}/bridge/tracking-db/username',
-                'password': f'/{env_stage}/bridge/tracking-db/password',
-                'port': f'/{env_stage}/bridge/tracking-db/port'
-        }
+                'host': f'/{self.env_stage}/bridge/tracking-db/host',
+                'name': f'/{self.env_stage}/bridge/tracking-db/name',
+                'username': f'/{self.env_stage}/bridge/tracking-db/username',
+                'password': f'/{self.env_stage}/bridge/tracking-db/password',
+                'port': f'/{self.env_stage}/bridge/tracking-db/port'
+            }
             
             # Get all parameters in a single call for efficiency
             parameter_names = list(parameter_paths.values())
@@ -622,11 +621,11 @@ class DatabaseManager:
 # Singleton instance
 _db_manager = None
 
-def get_db_manager() -> DatabaseManager:
+def get_db_manager(env_param_in=None) -> DatabaseManager:
     """Get the singleton database manager instance."""
     global _db_manager
     if _db_manager is None:
-        _db_manager = DatabaseManager()
+        _db_manager = DatabaseManager(env_param=env_param_in)
     return _db_manager
 
 

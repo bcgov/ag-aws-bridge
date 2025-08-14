@@ -106,8 +106,8 @@
     "ChangePassword": [
       {
         "input": {
-          "NewPassword": "",
-          "OldPassword": ""
+          "NewPassword": "]35d/{pB9Fo9wJ",
+          "OldPassword": "3s0K_;xh4~8XXI"
         },
         "comments": {
           "input": {
@@ -129,7 +129,7 @@
           "AccessKey": {
             "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
             "CreateDate": "2015-03-09T18:39:23.411Z",
-            "SecretAccessKey": "",
+            "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY",
             "Status": "Active",
             "UserName": "Bob"
           }
@@ -217,7 +217,7 @@
     "CreateLoginProfile": [
       {
         "input": {
-          "Password": ",
+          "Password": "h]6EszR}vJ*m",
           "PasswordResetRequired": true,
           "UserName": "Bob"
         },
@@ -1469,7 +1469,7 @@
     "UpdateLoginProfile": [
       {
         "input": {
-          "Password": "",
+          "Password": "SomeKindOfPassword123!@#",
           "UserName": "Bob"
         },
         "comments": {

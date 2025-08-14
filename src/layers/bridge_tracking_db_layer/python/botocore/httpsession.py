@@ -45,7 +45,7 @@ try:
         from urllib3.contrib.pyopenssl import (
             orig_util_SSLContext as SSLContext,
         )
-except ImportError:
+except (AttributeError, ImportError):
     from urllib3.util.ssl_ import SSLContext
 
 try:
@@ -94,7 +94,7 @@ def get_cert_path(verify):
         return verify
 
     cert_path = where()
-    logger.debug(f"Certificate path: {cert_path}")
+    logger.debug("Certificate path: %s", cert_path)
 
     return cert_path
 
