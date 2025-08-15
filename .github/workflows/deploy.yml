@@ -92,4 +92,4 @@ jobs:
           --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
           --no-confirm-changeset \
           --no-fail-on-empty-changeset \
-          --parameter-overrides Environment=dev
+          --parameter-overrides Environment=dev-test
