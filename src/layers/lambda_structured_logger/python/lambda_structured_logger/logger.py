@@ -40,6 +40,7 @@ class LambdaStructuredLogger:
         message: str,
         level: Union[str, LogLevel] = LogLevel.INFO,
         job_id: Optional[str] = None,
+        context_data: Optional[Dict[str, Any]] = None,
         axon_case_metadata: Optional[Dict[str, Any]] = None,
         axon_evidence_metadata: Optional[Dict[str, Any]] = None,
         api_metadata: Optional[Dict[str, Any]] = None,
@@ -57,6 +58,7 @@ class LambdaStructuredLogger:
             message: Human-readable description
             level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
             job_id: Unique identifier for the workflow
+            context_data: General contextual information about the operation or request
             case_metadata: Metadata about cases (source_case_id, title, evidence counts, etc.)
             evidence_metadata: Metadata about evidence files (evidence_id, file_id, type, size, checksum, etc.)
             api_metadata: Information about API calls (request_url, method, status_code, response_time, etc.)
@@ -87,6 +89,7 @@ class LambdaStructuredLogger:
         # Add optional fields only if they have values
         optional_fields = {
             "job_id": job_id,
+            "context_data": context_data,
             "case_metadata": axon_case_metadata,
             "evidence_metadata": axon_evidence_metadata,
             "api_metadata": api_metadata,
