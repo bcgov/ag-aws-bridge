@@ -18,9 +18,6 @@ Parameters:
 Globals:
   Function:
     Timeout: 30
-    Environment:
-      Variables:
-        ENV_STAGE: !Ref Environment
     Tracing: Active
     # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
     LoggingConfig:
@@ -57,6 +54,9 @@ Resources:
       Layers:
         - !Ref LambdaStructuredLoggerLayer
       Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
+      Environment:
+        Variables:
+          ENV_STAGE: !Ref Environment
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
