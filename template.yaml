@@ -83,5 +83,5 @@ Outputs:
     Description: Hello World Lambda Function ARN
     Value: !GetAtt HelloWorldFunction.Arn
   HelloWorldFunctionIamRole:
-    Description: Implicit IAM Role created for Hello World function
-    Value: !GetAtt HelloWorldFunctionRole.Arn
+    Description: "bridge axon authenticator Lambda Execution Role ARN"
+    Value: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
