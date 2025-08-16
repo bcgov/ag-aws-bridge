@@ -2,6 +2,7 @@ import json
 import boto3
 #import requests
 import urllib3
+import urllib.parse
 import os 
 import time
 
@@ -12,33 +13,40 @@ from datetime import timedelta
 
 
 def lambda_handler(event, context):
+    #os.environ["OTEL_PYTHON_DISABLED"] = "true"
+
     # Initialize the logger
     logger = LambdaStructuredLogger()
 
+ # Log the start of the function
+    logger.log_start(
+        event="Axon Case Detector Start",
+        job_id=context.aws_request_id
+    )
+
     # Initialize AWS SSM client
     ssm_client = boto3.client('ssm')
-    
+    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [ssm init]")
+
+
     sqs = boto3.client('sqs')
+    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [sqs init]")
 
     # Initialize database manager
     # Get environment stage from environment variable
     env_stage = os.environ.get('ENV_STAGE', 'dev-test')
 
+    logger.log(event="pre_db_init", status=LogStatus.IN_PROGRESS, message="Before DB manager init")
+
+
     db_manager = get_db_manager(env_param_in=env_stage)
-    #db_config =  db_manager.get_config_from_ssm()
+    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [db manager init ]")
 
     #initialize HTTP Connection Pool
     http = urllib3.PoolManager()
-
-    # Log the start of the function
-    logger.log_start(
-        event="simple_lambda_execution",
-        job_id=context.aws_request_id
-    )
-    
+    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [http manager init ]")
    
-    logger.info(f"Loading configuration for environment: {env_stage}")
-            
+    #logger.info(f"Loading configuration for environment: {env_stage}")
     
     # Collect SSM parameters
     try:
@@ -47,9 +55,11 @@ def lambda_handler(event, context):
         parameter_names = [
             f'/{env_stage}/axon/api/get_cases_url_filter_path',
             f'/{env_stage}/axon/api/authentication_url',
+            f'/{env_stage}/axon/api/base_url',
             f'/{env_stage}/axon/api/bearer',
             f'/{env_stage}/axon/api/client_secret',
             f'/{env_stage}/axon/api/client_id',
+            f'/{env_stage}/axon/api/agency_id',
             f'/{env_stage}/axon/api/case_detector_interval_mins',
             f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found'
         ]
@@ -66,92 +76,101 @@ def lambda_handler(event, context):
             parameters[param['Name']] = param['Value']
 
         if response.get('InvalidParameters'):
-            logger.log_error("SSM Param Retrieval", details={"invalid_parameters": response['InvalidParameters']})
+            logger.log_error(event = "SSM Param Retrieval", error=none,job_id=context.aws_request_id)
             raise Exception(f"Failed to retrieve some parameters: {response['InvalidParameters']}")
         
         # Add API method
         parameters["method"] = "POST"
-        api_url = parameters[f'/{env_stage}/axon/api/authentication_url']
-
-
-        
+        api_url =  parameters[f'/{env_stage}/axon/api/base_url']  + parameters[f'/{env_stage}/axon/api/authentication_url']
+        #https://bcps-dev.ca.evidence.com/api/oauth2/token
         # Get API bearer token
         try:
             payload = {
-                "client_id" : parameters["f/{env_stage}/axon/api/client_id"],
-                "grant_type" : "client_credentials",
-                "client_secret" : parameters["f/{env_stage}/axon/api/client_secret"]
+            "client_id": parameters[f'/{env_stage}/axon/api/client_id'],
+            "grant_type": "client_credentials",
+            "client_secret": parameters[f'/{env_stage}/axon/api/client_secret']
             }
-            response = http.request('POST', api_url, 
-            body=json.dumps(payload).encode('utf-8'), headers={'Content-Type': 'application/json'},timeout=urllib3.Timeout(connect=5, read=10))
-          
-            # Log success and return the response
+            # Convert payload to URL-encoded format
+            encoded_payload = urllib.parse.urlencode(payload).encode('utf-8')
+
+            response = http.request(
+                method='POST',
+                url=api_url,
+                body=encoded_payload,
+                headers={'Content-Type': 'application/x-www-form-urlencoded'}
+            )
             logger.log_success(
                 event="api_call",
-                details={"status_code": response.status_code, "url": api_url}
+                message="Bearer token retrieval success",
+                job_id=context.aws_request_id,
+                custom_metadata={"status_code": response.status, "url": api_url}
             )
-            data = response.json() 
-            #parameters["f/{env_stage}/axon/api/bearer"] = data.get("access_token")
+            data = json.loads(response.data.decode('utf-8'))  # Decode response properly
             parameters[f'/{env_stage}/axon/api/bearer'] = data.get("access_token")
-
-
-
+            
         except urllib3.exceptions.HTTPError as e:
             logger.log_error(
-                event="api_call_failed",
-                details={"error": str(e), "url": api_url}
+            event="api_call_failed",
+            error=e,
+            job_id=context.aws_request_id
             )
             return {
-                'statusCode': 500,
-                'body': json.dumps({
-                    'message': 'Error getting bearer token',
-                    'error': str(e)
-                })
+            'statusCode': 500,
+            'body': json.dumps({
+            'message': 'Error getting bearer token',
+            'error': str(e)
+            })
             }
         
         # Prepare headers for the GET request (assuming bearer token authentication)
         headers = {
-            'Authorization': f"Bearer {parameters['f/{env_stage}/axon/api/bearer']}",
+            'Authorization': f"Bearer {parameters[f'/{env_stage}/axon/api/bearer']}",
             'Content-Type': 'application/json'
         }
         # Make the GET request to the API endpoint
-        api_url = parameters['f/{env_stage}/axon/api/get_cases_url_filter_path']
+        api_url = parameters[f'/{env_stage}/axon/api/base_url'] + 'api/v2/agencies/' +  parameters[f'/{env_stage}/axon/api/agency_id'] + '/cases'
+        logger.log(event="created api url ", status=LogStatus.IN_PROGRESS, message="API URL constructed : " + api_url)
 
         # Get current UTC time
         current_utc_time = datetime.now(timezone.utc)
+        current_utc_time_str = current_utc_time.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
         # Get interval to use
         case_detector_interval_mins = int(parameters[f'/{env_stage}/axon/api/case_detector_interval_mins'])
 
-
         # Substract 5 minutes to get second UTC time
         fivemins_past = current_utc_time - timedelta(minutes=case_detector_interval_mins)
+        fivemins_past_str = fivemins_past.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
         
         # make filter string
-        filter_string = f"createdOn in {fivemins_past.isoformat()} to {current_utc_time.isoformat()}"
+        filter_string = f"createdOn in {fivemins_past_str} to {current_utc_time_str}"
 
         try:
             params = {
                 "filter": filter_string
             }
+            logger.log(event="filter string ", status=LogStatus.IN_PROGRESS, message="filter string : " + filter_string)
             start = time.perf_counter()
-            response = http.request('GET', api_url, fields=params,timeout=urllib3.Timeout(connect=5, read=10))
+            response = http.request('GET', api_url, fields=params,headers = headers, timeout=urllib3.Timeout(connect=5, read=10))
            
             if response.status >= 400: raise Exception(f"HTTP error: {response.status}")
 
             # Get response time
             response_time = time.perf_counter() - start
 
-            logger.log_api_call(event="call to Axon Get Cases", method="GET", status_code= response.status_code, 
+            logger.log_api_call(event="call to Axon Get Cases", url=api_url, method="GET", status_code= response.status, 
             response_time = response_time,   job_id=context.aws_request_id)
 
             # Log success and return the response
             logger.log_success(
                 event="api_call",
-                details={"status_code": response.status_code, "url": api_url}
+                message="Call to get cases successful",
+                job_id = context.aws_request_id,
+                custom_metadata={"status_code": response.status, "url": api_url}
             )
 
-            if response.status_code == 200:
+            if response.status == 200:
                 # Parse JSON response
                 json_data = json.loads(response.data().decode('utf-8'))
                  # Extract top-level meta information
@@ -165,7 +184,7 @@ def lambda_handler(event, context):
                      # Get response time
                     response_time = response.elapsed.total_seconds()
             
-                    logger.log_api_call(event="call to Axon Get Cases successful. Found at least 1 case", method="GET", status_code= response.status_code, 
+                    logger.log_api_call(event="call to Axon Get Cases successful. Found at least 1 case", url=api_url, method="GET", status_code= response.status, 
                     response_time = response_time,   job_id=context.aws_request_id)
 
                     for item in data:
@@ -235,7 +254,8 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.log_error(
                 event="api_call_failed",
-                details={"error": str(e), "url": api_url}
+                error=e,
+               job_id = context.aws_request_id
             )
             return {
                 'statusCode': 500,
@@ -248,7 +268,8 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.log_error(
             event="SSM Param Retrieval",
-            details={"error": str(e)}
+            error=e,
+            job_id=context.aws_request_id
         )
         return {
             'statusCode': 500,
@@ -257,3 +278,7 @@ def lambda_handler(event, context):
                 'error': str(e)
             })
         }
+    finally:
+    # Ensure connections are returned to the pool
+        if "db_manager" in locals():
+            db_manager.close_connections()
