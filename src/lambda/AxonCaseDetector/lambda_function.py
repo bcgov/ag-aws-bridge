@@ -172,7 +172,8 @@ def lambda_handler(event, context):
 
             if response.status == 200:
                 # Parse JSON response
-                json_data = json.loads(response.data().decode('utf-8'))
+                json_data = json.loads(response.data.decode('utf-8'))
+                print(json_data)
                  # Extract top-level meta information
                 meta = json_data.get("meta", {})
                 offset = meta.get("offset")
@@ -213,29 +214,40 @@ def lambda_handler(event, context):
                         
                         db_manager.create_evidence_transfer_job(job_data=queryParams)
 
-                logger.log_database_update_jobs(job_id=context.aws_request_id,status=status, rows_affected=count, response_time=response.elapsed.total_seconds())
+                logger.log_database_update_jobs(job_id=context.aws_request_id,status=response.status, rows_affected=count, response_time_ms=response_time)
 
                 # Send SQS Message 
                 queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
 
+                # Optionally set queue attributes first (e.g., for KMS encryption) - run this only once or as needed
                 try:
-                    # Send a message to the queue
+                    sqs.set_queue_attributes(
+                    QueueUrl=queue_url,
+                    Attributes={
+                        'KmsMasterKeyId': 'alias/aws/sqs'  # Correct alias for default AWS-managed KMS key
+                    }
+                    )
+                except Exception as e:
+                    print(f"Error setting queue attributes: {e}")
+    
+                try:
+                # Send a message to the queue
                     response = sqs.send_message(
                     QueueUrl=queue_url,
                     MessageBody='Cases detected, details stored',
-                    DelaySeconds=5, # Deliver after 5 seconds
+                    DelaySeconds=0,  # Deliver after 5 seconds
+                    MessageGroupId="AXON" + context.aws_request_id,
                     MessageAttributes={
-                    'Job_id' : {
-                        'DataType'  : 'Number',
-                        'Value'     : context.aws_request_id
-                    },
-                    'Source_case_title' :{
-                        'DataType'  : 'String',
-                        'Value'     : ''
+                        'Job_id': {
+                            'DataType': 'String',
+                            'StringValue': context.aws_request_id
+                        },
+                        'Source_case_title': {
+                            'DataType': 'String',
+                            'StringValue': 'N/A'  # Replace with actual value if available; must not be empty
+                        }      
                     }
-                    }
-                    )
-                    print(f"Message sent successfully. Message ID: {response['MessageId']}")
+                )
 
                 except Exception as e:
                     print(f"Error sending message: {e}")
@@ -246,7 +258,7 @@ def lambda_handler(event, context):
                 # Get response time
                 #response_time = response.elapsed.total_seconds()
             
-                logger.log_api_call(event="call to Axon Get Cases, no new cases found", method="POST", status_code= response.status_code, 
+                logger.log_api_call(event="call to Axon Get Cases, no new cases found", method="POST", status_code= response.status, 
                 response_time = response_time,   job_id=context.aws_request_id)
                 result = {"statusCode": 200, "body": "Success calling API, no results found."}
                 return result
