@@ -132,12 +132,14 @@ def lambda_handler(event, context):
         logger.log(event="created api url ", status=LogStatus.IN_PROGRESS, message="API URL constructed : " + api_url)
 
         # Get current UTC time
-        current_utc_time = datetime.now(timezone.utc)
+        #current_utc_time = datetime.now(timezone.utc)
+        #set date/time for testing
+        current_utc_time = datetime(2025, 6, 12, 19, 5, 0, tzinfo=timezone.utc)
         current_utc_time_str = current_utc_time.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
         # Get interval to use
-        case_detector_interval_mins = int(parameters[f'/{env_stage}/axon/api/case_detector_interval_mins'])
-
+        #case_detector_interval_mins = int(parameters[f'/{env_stage}/axon/api/case_detector_interval_mins'])
+        case_detector_interval_mins  = 2880
         # Substract 5 minutes to get second UTC time
         fivemins_past = current_utc_time - timedelta(minutes=case_detector_interval_mins)
         fivemins_past_str = fivemins_past.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
@@ -196,7 +198,7 @@ def lambda_handler(event, context):
                 if count >= 1:
                     data = json_data.get("data", [])
                      # Get response time
-                    response_time = response.elapsed.total_seconds()
+                    #response_time = time.perf_counter() - start
             
                     logger.log_api_call(event="call to Axon Get Cases successful. Found at least 1 case", url=api_url, method="GET", status_code= response.status, 
                     response_time = response_time,   job_id=context.aws_request_id)
@@ -220,8 +222,8 @@ def lambda_handler(event, context):
                         case_shared_from = attributes.get("caseSharedFrom", [])
 
                         queryParams = {"job_id" : context.aws_request_id, "job_created_utc" : current_utc_time, 
-                        "source_agency" : case_shared_from, "source_case_id" : item_id,
-                        "source_system" : "Axon",
+                        "source_agency" : case_shared_from, "source_case_id" : item_id, "job_status_code" : "80",
+                        "source_system" : "Axon", "source_case_evidence_count_total" : count,
                          "source_case_title" : title, "last_modified_process": "lambda: axon case detector", "source_case_last_modified_utc" : sourceCaseLastModified ,
                           "last_modified_utc" : current_utc_time}
                         
