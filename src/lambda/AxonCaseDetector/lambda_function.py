@@ -189,7 +189,9 @@ def lambda_handler(event, context):
                 meta = json_data.get("meta", {})
                 offset = meta.get("offset")
                 limit = meta.get("limit")
-                count = meta.get("count")
+                count = int(meta.get("count"))
+
+                logger.log(event="case count found  ", status=LogStatus.IN_PROGRESS, message="count : " + str(count))
 
                 if count >= 1:
                     data = json_data.get("data", [])
@@ -248,17 +250,17 @@ def lambda_handler(event, context):
 
                         except Exception as e:
                             print(f"Error sending message: {e}")
-
-                result = {"statusCode": 200, "body": "Success calling API, at least 1 result found."}
-                return result
-            else:
+                    
+                    result = {"statusCode": 200, "body": "Success calling API, at least 1 result found."}
+                    return result
+                else:
                 # Get response time
                 #response_time = response.elapsed.total_seconds()
-            
-                logger.log_api_call(event="call to Axon Get Cases, no new cases found", method="POST", status_code= response.status, 
-                response_time = response_time,   job_id=context.aws_request_id)
-                result = {"statusCode": 200, "body": "Success calling API, no results found."}
-                return result
+                    logger.log_api_call(event="call to Axon Get Cases successful. Found no cases", url=api_url, method="GET", status_code= response.status, 
+                    response_time = response_time,   job_id=context.aws_request_id)
+                   
+                    result = {"statusCode": 200, "body": "Success calling API, no results found."}
+                    return result
             
         except Exception as e:
             logger.log_error(
