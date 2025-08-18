@@ -169,6 +169,17 @@ def lambda_handler(event, context):
                 job_id = context.aws_request_id,
                 custom_metadata={"status_code": response.status, "url": api_url}
             )
+            queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
+              # Optionally set queue attributes first (e.g., for KMS encryption) - run this only once or as needed
+            try:
+                sqs.set_queue_attributes(
+                    QueueUrl=queue_url,
+                    Attributes={
+                        'KmsMasterKeyId': 'alias/aws/sqs'  # Correct alias for default AWS-managed KMS key
+                    }
+                    )
+            except Exception as e:
+                print(f"Error setting queue attributes: {e}")
 
             if response.status == 200:
                 # Parse JSON response
@@ -213,44 +224,30 @@ def lambda_handler(event, context):
                           "last_modified_utc" : current_utc_time}
                         
                         db_manager.create_evidence_transfer_job(job_data=queryParams)
+                        logger.log_database_update_jobs(job_id=context.aws_request_id,status=response.status, rows_affected=count, response_time_ms=response_time)
 
-                logger.log_database_update_jobs(job_id=context.aws_request_id,status=response.status, rows_affected=count, response_time_ms=response_time)
+                        # Send SQS Message            
+                        try:
+                        # Send a message to the queue
+                            response = sqs.send_message(
+                                QueueUrl=queue_url,
+                                MessageBody='Cases detected, details stored',
+                                DelaySeconds=0,  # Deliver after 5 seconds
+                                MessageGroupId="AXON-" + item_id,
+                                MessageAttributes={
+                                    'Job_id': {
+                                        'DataType': 'String',
+                                        'StringValue': context.aws_request_id
+                                    },
+                                    'Source_case_title': {
+                                        'DataType': 'String',
+                                        'StringValue': title
+                                    }      
+                                }
+                            )
 
-                # Send SQS Message 
-                queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
-
-                # Optionally set queue attributes first (e.g., for KMS encryption) - run this only once or as needed
-                try:
-                    sqs.set_queue_attributes(
-                    QueueUrl=queue_url,
-                    Attributes={
-                        'KmsMasterKeyId': 'alias/aws/sqs'  # Correct alias for default AWS-managed KMS key
-                    }
-                    )
-                except Exception as e:
-                    print(f"Error setting queue attributes: {e}")
-    
-                try:
-                # Send a message to the queue
-                    response = sqs.send_message(
-                    QueueUrl=queue_url,
-                    MessageBody='Cases detected, details stored',
-                    DelaySeconds=0,  # Deliver after 5 seconds
-                    MessageGroupId="AXON" + context.aws_request_id,
-                    MessageAttributes={
-                        'Job_id': {
-                            'DataType': 'String',
-                            'StringValue': context.aws_request_id
-                        },
-                        'Source_case_title': {
-                            'DataType': 'String',
-                            'StringValue': 'N/A'  # Replace with actual value if available; must not be empty
-                        }      
-                    }
-                )
-
-                except Exception as e:
-                    print(f"Error sending message: {e}")
+                        except Exception as e:
+                            print(f"Error sending message: {e}")
 
                 result = {"statusCode": 200, "body": "Success calling API, at least 1 result found."}
                 return result
