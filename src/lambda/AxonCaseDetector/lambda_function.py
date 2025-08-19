@@ -148,6 +148,7 @@ def lambda_handler(event, context):
         # make filter string
         filter_string = f"createdOn in {fivemins_past_str} to {current_utc_time_str}"
 
+        transferJobStatus = ""
         try:
             params = {
                 "filter": filter_string
@@ -195,6 +196,11 @@ def lambda_handler(event, context):
 
                 logger.log(event="case count found  ", status=LogStatus.IN_PROGRESS, message="count : " + str(count))
 
+                # get status code 
+                transferJobStatus = db_manager.get_status_code_by_value("NEW-EVIDENCE-SHARE")
+                if transferJobStatus:
+                    statusIdentifier = str(transferJobStatus["identifier"])
+
                 if count >= 1:
                     data = json_data.get("data", [])
                      # Get response time
@@ -221,8 +227,10 @@ def lambda_handler(event, context):
                         # Extract caseSharedFrom (list)
                         case_shared_from = attributes.get("caseSharedFrom", [])
 
+                      
+
                         queryParams = {"job_id" : context.aws_request_id, "job_created_utc" : current_utc_time, 
-                        "source_agency" : case_shared_from, "source_case_id" : item_id, "job_status_code" : "80",
+                        "source_agency" : case_shared_from, "source_case_id" : item_id, "job_status_code" : statusIdentifier,
                         "source_system" : "Axon", "source_case_evidence_count_total" : count,
                          "source_case_title" : title, "last_modified_process": "lambda: axon case detector", "source_case_last_modified_utc" : sourceCaseLastModified ,
                           "last_modified_utc" : current_utc_time}
@@ -232,6 +240,7 @@ def lambda_handler(event, context):
 
                         # Send SQS Message            
                         try:
+                            logger.log(event="calling SQS to add msg ", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
                         # Send a message to the queue
                             response = sqs.send_message(
                                 QueueUrl=queue_url,
@@ -249,6 +258,7 @@ def lambda_handler(event, context):
                                     }      
                                 }
                             )
+                           # logger.log_sqs_message_sent(queue_url = queue_url, message_id=response, )
 
                         except Exception as e:
                             print(f"Error sending message: {e}")
