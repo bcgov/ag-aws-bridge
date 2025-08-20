@@ -1,6 +1,8 @@
 import json
 import os
 import boto3
+import requests
+from urllib.parse import urljoin
 from botocore.exceptions import ClientError
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 
@@ -15,6 +17,7 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
     Args:
         env_stage (str): Environment stage (e.g., 'dev', 'prod')
         logger: LambdaStructuredLogger instance
+        event: Lambda event object
         context_data (dict): Additional context for logging
 
     Returns:
@@ -25,6 +28,7 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
 
     # Define parameter paths
     parameter_paths = {
+        "base_url": f"/{env_stage}/axon/api/base_url",
         "authentication_url": f"/{env_stage}/axon/api/authentication_url",
         "client_id": f"/{env_stage}/axon/api/client_id",
         "grant_type": f"/{env_stage}/axon/api/grant_type",
@@ -147,6 +151,221 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
         raise
 
 
+def get_access_token(ssm_parameters, logger, event, context_data=None):
+    """
+    Retrieve access token from the third-party API using client credentials.
+
+    Args:
+        ssm_parameters (dict): Dictionary containing authentication parameters
+        logger: LambdaStructuredLogger instance
+        event: Lambda event object
+        context_data (dict): Additional context for logging
+
+    Returns:
+        str: Access token
+
+    Raises:
+        Exception: If token retrieval fails
+    """
+    if context_data is None:
+        context_data = {}
+
+    # Extract required parameters
+    base_url = ssm_parameters.get("base_url")
+    auth_url = ssm_parameters.get("authentication_url")
+    client_id = ssm_parameters.get("client_id")
+    client_secret = ssm_parameters.get("client_secret")
+    grant_type = ssm_parameters.get("grant_type", "client_credentials")
+    full_auth_url = urljoin(base_url, auth_url)
+
+    # Validate required parameters
+    required_params = ["base_url", "authentication_url", "client_id", "client_secret"]
+    missing_params = [param for param in required_params if not ssm_parameters.get(param)]
+    
+    if missing_params:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_authentication",
+            context_data={
+                **context_data,
+                "missing_parameters": missing_params,
+                "operation": "token_retrieval_validation_error",
+            },
+        )
+        raise ValueError(f"Missing required authentication parameters: {missing_params}")
+
+    logger.log(
+        event=event,
+        level=LogLevel.INFO,
+        status=LogStatus.SUCCESS,
+        message="log_token_authentication",
+        context_data={
+            **context_data,
+            "full_auth_url": full_auth_url,
+            "client_id": client_id,
+            "grant_type": grant_type,
+            "operation": "token_retrieval_start",
+        },
+    )
+
+    try:
+        # Prepare the authentication request
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json"
+        }
+
+        # Prepare the request body
+        data = {
+            "grant_type": grant_type,
+            "client_id": client_id,
+            "client_secret": client_secret
+        }
+
+        # Make the token request
+        response = requests.post(
+            full_auth_url,
+            headers=headers,
+            data=data,
+            timeout=30  # 30 second timeout
+        )
+
+        # Log the response status
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="log_token_authentication",
+            context_data={
+                **context_data,
+                "status_code": response.status_code,
+                "response_time_ms": response.elapsed.total_seconds() * 1000,
+                "operation": "token_retrieval_response_received",
+            },
+        )
+
+        # Check if the request was successful
+        if response.status_code == 200:
+            token_data = response.json()
+            access_token = token_data.get("access_token")
+            
+            if not access_token:
+                logger.log(
+                    event=event,
+                    level=LogLevel.ERROR,
+                    status=LogStatus.FAILURE,
+                    message="log_token_authentication",
+                    context_data={
+                        **context_data,
+                        "response_keys": list(token_data.keys()),
+                        "operation": "token_retrieval_missing_token",
+                    },
+                )
+                raise ValueError("Access token not found in response")
+
+            # Log successful token retrieval (without exposing the token)
+            logger.log(
+                event=event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
+                message="log_token_authentication",
+                context_data={
+                    **context_data,
+                    "token_type": token_data.get("token_type", "unknown"),
+                    "expires_in": token_data.get("expires_in"),
+                    "has_refresh_token": "refresh_token" in token_data,
+                    "operation": "token_retrieval_success",
+                },
+            )
+
+            return access_token
+
+        else:
+            # Handle HTTP errors
+            error_detail = "Unknown error"
+            try:
+                error_response = response.json()
+                error_detail = error_response.get("error_description", 
+                              error_response.get("error", "Unknown error"))
+            except:
+                error_detail = response.text[:200]  # First 200 chars of response
+
+            logger.log(
+                event=event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
+                message="log_token_authentication",
+                context_data={
+                    **context_data,
+                    "status_code": response.status_code,
+                    "error_detail": error_detail,
+                    "operation": "token_retrieval_http_error",
+                },
+            )
+
+            raise Exception(f"Token request failed with status {response.status_code}: {error_detail}")
+
+    except requests.exceptions.Timeout:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_authentication",
+            context_data={
+                **context_data,
+                "error": "Request timeout",
+                "operation": "token_retrieval_timeout",
+            },
+        )
+        raise Exception("Token request timed out")
+
+    except requests.exceptions.ConnectionError:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_authentication",
+            context_data={
+                **context_data,
+                "error": "Connection error",
+                "operation": "token_retrieval_connection_error",
+            },
+        )
+        raise Exception("Failed to connect to authentication server")
+
+    except requests.exceptions.RequestException as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_authentication",
+            context_data={
+                **context_data,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "operation": "token_retrieval_request_error",
+            },
+        )
+        raise Exception(f"Token request failed: {str(e)}")
+
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_authentication",
+            context_data={
+                **context_data,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "operation": "token_retrieval_unexpected_error",
+            },
+        )
+        raise
+
+
 def lambda_handler(event, context):
     """Sample pure Lambda function
 
@@ -169,14 +388,6 @@ def lambda_handler(event, context):
         Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
     """
 
-    # try:
-    #     ip = requests.get("http://checkip.amazonaws.com/")
-    # except requests.RequestException as e:
-    #     # Send some context about this error to Lambda Logs
-    #     print(e)
-
-    #     raise e
-
     # Initialize the logger
     logger = LambdaStructuredLogger()
 
@@ -193,18 +404,56 @@ def lambda_handler(event, context):
         "env_stage": env_stage,
     }
 
-    # Log the start of the function
-    logger.log_start(event="simple_lambda_execution", job_id=request_id)
+    try:
+        # Log the start of the function
+        logger.log_start(event="simple_lambda_execution", job_id=request_id)
 
-    # Retrieve SSM parameters
-    ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
+        # Retrieve SSM parameters
+        ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps(
-            {
-                "message": "hello world",
-                # "location": ip.text.replace("\n", "")
-            }
-        ),
-    }
+        # Get access token from third-party API
+        access_token = get_access_token(ssm_parameters, logger, event, base_context)
+
+        # Log successful completion
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="lambda_execution_complete",
+            context_data={
+                **base_context,
+                "operation": "lambda_execution_success",
+            },
+        )
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "Successfully retrieved access token",
+                "token_length": len(access_token) if access_token else 0,
+                # Note: Never return the actual token in the response for security reasons
+            })
+        }
+
+    except Exception as e:
+        # Log the error
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="lambda_execution_error",
+            context_data={
+                **base_context,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "operation": "lambda_execution_failure",
+            },
+        )
+
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "message": "Internal server error",
+                "error": str(e)
+            })
+        }
