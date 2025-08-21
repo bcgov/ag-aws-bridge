@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2 import pool, sql
 from psycopg2.extras import RealDictCursor
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from botocore.config import Config
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,7 +29,8 @@ class DatabaseManager:
     def _get_ssm_client(self):
         """Get or create SSM client."""
         if self.ssm_client is None:
-            self.ssm_client = boto3.client('ssm')
+              db_config = Config(connect_timeout=25, retries={"max_attempts": 5, "mode": "standard"})
+              self.ssm_client = boto3.client('ssm',region_name="ca-central-1", config=db_config)
         return self.ssm_client
     
     def _get_db_config_from_ssm(self):
