@@ -3,6 +3,7 @@ import os
 import boto3
 import requests
 from urllib.parse import urljoin
+from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 
@@ -151,6 +152,118 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
         raise
 
 
+def store_access_token(env_stage, access_token, token_data, logger, event, context_data=None):
+    """
+    Store the access token in SSM Parameter Store as a SecureString.
+
+    Args:
+        env_stage (str): Environment stage (e.g., 'dev', 'prod')
+        access_token (str): The access token to store
+        token_data (dict): Full token response data for metadata
+        logger: LambdaStructuredLogger instance
+        event: Lambda event object
+        context_data (dict): Additional context for logging
+
+    Returns:
+        bool: True if successful, raises exception if failed
+    """
+    if context_data is None:
+        context_data = {}
+
+    # Define the parameter path for the bearer token
+    bearer_parameter_name = f"/{env_stage}/axon/api/bearer"
+    
+    logger.log(
+        event=event,
+        level=LogLevel.INFO,
+        status=LogStatus.SUCCESS,
+        message="log_token_storage",
+        context_data={
+            **context_data,
+            "parameter_name": bearer_parameter_name,
+            "operation": "token_storage_start",
+        },
+    )
+
+    try:
+        # Prepare parameter description with token metadata
+        description = f"Bearer token for Axon API - {env_stage} environment"
+        # if token_data.get("expires_in"):
+        #     description += f" (expires in {token_data.get('expires_in')} seconds)"
+
+        if token_data.get("expires_on"):
+            expires_on_ms = int(token_data["expires_on"])
+            timestamp_seconds = expires_on_ms / 1000
+            expiry_dt = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
+            expiry_readable = expiry_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            description += f" (expires on {expiry_readable})"
+            print(description)
+
+        # Store the token as a SecureString
+        response = ssm_client.put_parameter(
+            Name=bearer_parameter_name,
+            Value=access_token,
+            Type="SecureString",
+            Description=description,
+            Overwrite=True,  # Allow overwriting existing parameter
+        )
+
+        # Log successful storage
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="log_token_storage",
+            context_data={
+                **context_data,
+                "parameter_name": bearer_parameter_name,
+                "parameter_version": response.get("Version"),
+                "parameter_tier": response.get("Tier"),
+                "token_length": len(access_token),
+                "operation": "token_storage_success",
+            },
+        )
+
+        return True
+
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        error_message = e.response["Error"]["Message"]
+
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_storage",
+            context_data={
+                **context_data,
+                "parameter_name": bearer_parameter_name,
+                "error_code": error_code,
+                "error_message": error_message,
+                "operation": "token_storage_client_error",
+            },
+        )
+
+        raise Exception(f"SSM Client Error during token storage: {error_code} - {error_message}")
+
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="log_token_storage",
+            context_data={
+                **context_data,
+                "parameter_name": bearer_parameter_name,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "operation": "token_storage_unexpected_error",
+            },
+        )
+
+        raise
+
+
 def get_access_token(ssm_parameters, logger, event, context_data=None):
     """
     Retrieve access token from the third-party API using client credentials.
@@ -162,7 +275,7 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
         context_data (dict): Additional context for logging
 
     Returns:
-        str: Access token
+        tuple: (access_token, token_data) - The access token and full response data
 
     Raises:
         Exception: If token retrieval fails
@@ -280,7 +393,7 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
                 },
             )
 
-            return access_token
+            return access_token, token_data
 
         else:
             # Handle HTTP errors
@@ -412,7 +525,10 @@ def lambda_handler(event, context):
         ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
         # Get access token from third-party API
-        access_token = get_access_token(ssm_parameters, logger, event, base_context)
+        access_token, token_data = get_access_token(ssm_parameters, logger, event, base_context)
+
+        # Store the access token in SSM Parameter Store
+        store_access_token(env_stage, access_token, token_data, logger, event, base_context)
 
         # Log successful completion
         logger.log(
@@ -429,9 +545,9 @@ def lambda_handler(event, context):
         return {
             "statusCode": 200,
             "body": json.dumps({
-                "message": "Successfully retrieved access token",
+                "message": "Successfully retrieved and stored access token",
                 "token_length": len(access_token) if access_token else 0,
-                # Note: Never return the actual token in the response for security reasons
+                "token_stored_at": f"/{env_stage}/axon/api/bearer",
             })
         }
 
