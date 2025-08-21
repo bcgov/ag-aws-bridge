@@ -10,6 +10,7 @@ from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from datetime import datetime, timezone
 from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
 from datetime import timedelta
+from botocore.config import Config
 
 
 def lambda_handler(event, context):
@@ -25,28 +26,28 @@ def lambda_handler(event, context):
     )
 
     # Initialize AWS SSM client
-    ssm_client = boto3.client('ssm')
-    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [ssm init]")
+    config = Config(connect_timeout=5, retries={"max_attempts": 5, "mode": "standard"})
+    ssm_client = boto3.client("ssm", region_name="ca-central-1", config=config)
+    #logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [ssm init]")
 
 
     sqs = boto3.client('sqs')
-    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [sqs init]")
+    #logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [sqs init]")
 
     # Initialize database manager
     # Get environment stage from environment variable
     env_stage = os.environ.get('ENV_STAGE', 'dev-test')
 
-    logger.log(event="pre_db_init", status=LogStatus.IN_PROGRESS, message="Before DB manager init")
+   # logger.log(event="pre_db_init", status=LogStatus.IN_PROGRESS, message="Before DB manager init")
 
 
     db_manager = get_db_manager(env_param_in=env_stage)
-    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [db manager init ]")
+    db_manager._initialize_pool()
+    #logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [db manager init ]")
 
     #initialize HTTP Connection Pool
     http = urllib3.PoolManager()
-    logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [http manager init ]")
-   
-    #logger.info(f"Loading configuration for environment: {env_stage}")
+    #logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [http manager init ]")
     
     # Collect SSM parameters
     try:
@@ -132,23 +133,25 @@ def lambda_handler(event, context):
         logger.log(event="created api url ", status=LogStatus.IN_PROGRESS, message="API URL constructed : " + api_url)
 
         # Get current UTC time
-        #current_utc_time = datetime.now(timezone.utc)
+        current_utc_time = datetime.now(timezone.utc)
         #set date/time for testing
-        current_utc_time = datetime(2025, 6, 12, 19, 5, 0, tzinfo=timezone.utc)
+        #current_utc_time = datetime(2025, 6, 12, 19, 5, 0, tzinfo=timezone.utc)
         current_utc_time_str = current_utc_time.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
         # Get interval to use
-        #case_detector_interval_mins = int(parameters[f'/{env_stage}/axon/api/case_detector_interval_mins'])
-        case_detector_interval_mins  = 2880
+        case_detector_interval_mins = int(parameters[f'/{env_stage}/axon/api/case_detector_interval_mins'])
+        #case_detector_interval_mins  = 2880
         # Substract 5 minutes to get second UTC time
         fivemins_past = current_utc_time - timedelta(minutes=case_detector_interval_mins)
         fivemins_past_str = fivemins_past.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-
         
         # make filter string
         filter_string = f"createdOn in {fivemins_past_str} to {current_utc_time_str}"
 
         transferJobStatus = ""
+        
+        db_health_Check = db_manager.health_check()
+        logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [db manager healthcheck, db healthy : " + str(db_health_Check["healthy"]))
         try:
             params = {
                 "filter": filter_string
@@ -195,12 +198,13 @@ def lambda_handler(event, context):
                 count = int(meta.get("count"))
 
                 logger.log(event="case count found  ", status=LogStatus.IN_PROGRESS, message="count : " + str(count))
-
+                db_health_Check = db_manager.health_check()
+                logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [db manager healthcheck 2 , db healthy : " + str(db_health_Check["healthy"]))
                 # get status code 
                 transferJobStatus = db_manager.get_status_code_by_value("NEW-EVIDENCE-SHARE")
                 if transferJobStatus:
                     statusIdentifier = str(transferJobStatus["identifier"])
-
+                
                 if count >= 1:
                     data = json_data.get("data", [])
                      # Get response time
