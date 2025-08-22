@@ -69,6 +69,20 @@ jobs:
           
           echo "Stack deleted successfully"
         fi
+        
+        if [ "$STACK_STATUS" = "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS" ]; then
+          echo "Stack is in UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS state. Deleting it first..."
+          aws cloudformation delete-stack \
+            --stack-name hello-world-lambda-dev \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name hello-world-lambda-dev \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Stack deleted successfully"
+        fi
 
     - name: Cache SAM build
       uses: actions/cache@v3

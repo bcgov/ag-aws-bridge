@@ -72,8 +72,7 @@ Resources:
           Type: ScheduleV2
           Properties:
             Description: "Refresh Axon API token every 3 hours"
-            # ScheduleExpression: "rate(3 hours)"
-            ScheduleExpression: "rate(5 minutes)"
+            ScheduleExpression: "rate(3 hours)"
             ScheduleExpressionTimezone: "UTC"
             State: ENABLED
             FlexibleTimeWindow:
@@ -121,4 +120,4 @@ Outputs:
       Name: !Sub "${AWS::StackName}-AxonAuthenticatorFunction"
   ScheduleExpression:
     Description: Schedule expression for token refresh
-    Value: "rate(5 minutes)"
+    Value: "rate(3 hours)"
