@@ -1,4 +1,4 @@
-import json
+mport json
 import boto3
 #import requests
 import urllib3
@@ -47,10 +47,8 @@ def lambda_handler(event, context):
             f'/{env_stage}/bridge/sqs-queues/arn_arn_q-transfer-exception',
             f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail',
             f'/{env_stage}/bridge/tracking-db/connection-string',
-            f'/{env_stage}/axon/api/client_id',
-            f'/{env_stage}/axon/api/agency_id',
-            f'/{env_stage}/axon/api/case_detector_interval_mins',
             f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found'
+           
         ]
         
         # Retrieve multiple parameters at once
@@ -67,10 +65,50 @@ def lambda_handler(event, context):
         if response.get('InvalidParameters'):
             logger.log_error(event = "SSM Param Retrieval", error=none,job_id=context.aws_request_id)
             raise Exception(f"Failed to retrieve some parameters: {response['InvalidParameters']}")
+        
+            
     except Exception as e:
             print(f"Error setting queue attributes: {e}")
             l  logger.log_error(
                 event="Error retrieving SSM params",
+                error=e,
+               job_id = context.aws_request_id
+            )
+    try:
+            queue_url = parameters[ f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
+
+            response = sqs.receive_message(
+                 QueueUrl=queue_url,
+                MaxNumberOfMessages=10,  # Batch size (1-10)
+                WaitTimeSeconds=20,      # Long polling timeout (0-20)
+                VisibilityTimeout=30     # Time message is invisible after receipt (adjust based on processing time)
+            )
+        
+            # Check if messages were received
+            if 'Messages' in response:
+                for message in response['Messages']:
+                    # Extract the message body (assuming JSON)
+                    body = json.loads(message['Body'])
+                    print(f"Received message: {body}")
+            
+                    # Process the message here
+                    job_id = body["job_id"]
+                    case_title = body["Source_case_title"]
+
+            
+                    # Delete the message after processing to remove it from the queue
+                    sqs.delete_message(
+                        QueueUrl=queue_url,
+                        ReceiptHandle=message['ReceiptHandle']
+                    )
+            else:
+                print("No messages in queue")
+    
+    
+    except Exception as qe :
+           print(f"Error setting queue attributes: {e}")
+            l  logger.log_error(
+                event="Error retrieving SQS messages ",
                 error=e,
                job_id = context.aws_request_id
             )
