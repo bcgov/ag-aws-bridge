@@ -84,6 +84,20 @@ jobs:
           echo "Stack deleted successfully"
         fi
 
+        if [ "$STACK_STATUS" = "ROLLBACK_FAILED" ]; then
+          echo "Stack is in ROLLBACK_FAILED state. Deleting it first..."
+          aws cloudformation delete-stack \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Stack deleted successfully"
+        fi
+        
     - name: Cache SAM build
       uses: actions/cache@v3
       with:
