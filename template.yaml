@@ -59,8 +59,6 @@ Resources:
               Mode: "OFF"
             RetryPolicy:
               MaximumRetryAttempts: 2
-            DeadLetterQueue:
-              Arn: !GetAtt TokenRefreshDLQ.Arn
       Layers:
         - !Ref LambdaStructuredLoggerLayer
       Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
