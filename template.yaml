@@ -1,9 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  BRIDGE
+  SAM Template for BRIDGE
 
-  Sample SAM Template for BRIDGE
 
 Parameters:
   Environment:
@@ -13,6 +12,7 @@ Parameters:
       - dev-test
       - prod
     Description: Environment name
+
 
 # More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
 Globals:
@@ -25,6 +25,7 @@ Globals:
   Api:
     TracingEnabled: true
 
+
 Resources:
   # Logger layer
   LambdaStructuredLoggerLayer:
@@ -36,27 +37,6 @@ Resources:
         - python3.11
         - python3.13
       RetentionPolicy: Retain
-
-  # HelloWorldFunction:
-  #   Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
-  #   Properties:
-  #     CodeUri: src/lambdas/axon-authenticator/hello_world/
-  #     Handler: app.lambda_handler
-  #     Runtime: python3.13
-  #     Architectures:
-  #     - x86_64
-  #     Events:
-  #       HelloWorld:
-  #         Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
-  #         Properties:
-  #           Path: /hello
-  #           Method: get
-  #     Layers:
-  #       - !Ref LambdaStructuredLoggerLayer
-  #     Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
-  #     Environment:
-  #       Variables:
-  #         ENV_STAGE: !Ref Environment
 
   AxonAuthenticatorFunction:
     Type: AWS::Serverless::Function
@@ -79,12 +59,30 @@ Resources:
               Mode: "OFF"
             RetryPolicy:
               MaximumRetryAttempts: 2
+            DeadLetterQueue:
+              Arn: !GetAtt TokenRefreshDLQ.Arn
       Layers:
         - !Ref LambdaStructuredLoggerLayer
       Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
       Environment:
         Variables:
           ENV_STAGE: !Ref Environment
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt TokenRefreshDLQ.Arn
+
+  # Dead Letter Queue for failed token refresh attempts
+  TokenRefreshDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "axon-token-refresh-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeoutSeconds: 60
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: "Token refresh failure handling"
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
@@ -93,31 +91,35 @@ Resources:
         Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
       ResourceQuery:
         Type: CLOUDFORMATION_STACK_1_0
+
   ApplicationInsightsMonitoring:
     Type: AWS::ApplicationInsights::Application
     Properties:
       ResourceGroupName:
         Ref: ApplicationResourceGroup
       AutoConfigurationEnabled: 'true'
+
+
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  # HelloWorldApi:
-  #   Description: API Gateway endpoint URL for Prod stage for Hello World 
-  #     function
-  #   Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
-  # HelloWorldFunction:
-  #   Description: Hello World Lambda Function ARN
-  #   Value: !GetAtt HelloWorldFunction.Arn
   AxonAuthenticatorFunctionIamRole:
     Description: "bridge axon authenticator Lambda Execution Role ARN"
     Value: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
+
   AxonAuthenticatorFunction:
     Description: Axon Authenticator Lambda Function ARN
     Value: !GetAtt AxonAuthenticatorFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-AxonAuthenticatorFunction"
+
   ScheduleExpression:
     Description: Schedule expression for token refresh
     Value: "rate(3 hours)"
+
+  TokenRefreshDLQ:
+    Description: Dead Letter Queue for failed token refresh attempts
+    Value: !Ref TokenRefreshDLQ
+    Export:
+      Name: !Sub "${AWS::StackName}-TokenRefreshDLQ"
