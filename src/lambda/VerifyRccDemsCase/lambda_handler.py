@@ -230,7 +230,7 @@ def lambda_handler(event, context):
                         headers=headers
                     )
                     response_time = time.perf_counter() - start_time
-
+                   
                     logger.log_api_call(
                         event="DEMS ISL Get Cases",
                         url=dems_api_url,
@@ -259,23 +259,34 @@ def lambda_handler(event, context):
                         )
 
                 if not found_dems_case:
-                    logger.log_warning(
-                        event="DEMS Case Not Found",
-                        message="No DEMS case found after trying all agency codes",
-                        job_id=job_id
+                    logger.log(
+                        event="axonRccAndDemsCaseValidator",
+                        status = "ERROR",
+                        message="Agency prefix lookup unsuccessful - not matched",
+                        job_id=job_id,
+                        additional_info={
+                            "rms_jur_id" : rms_jur_id,
+                            "agencyFileNumber" : agency_file_number
+                        }
                     )
+                    update_job_status = db_manager.get_status_code_by_value(value="INVALID-AGENCY-IDENTIFIER")
+                    if update_job_status:
+                        statusIdentifier = str(update_job_status["identifier"])
+                        db_manager.update_job_status(job_id=job_id,status_code=statusIdentifier,job_msg="",last_modified_process="lambda: rcc and dems case validator")
+
+
                     # Optionally send to exception queue
                 update_job_status = db_manager.get_status_code_by_value(value="VALID-CASE")
                 if update_job_status:
-                     statusIdentifier = str(update_job_status["identifier"])
-                db_manager.update_job_status(job_id=job_id,status_code=statusIdentifier,job_msg="",last_modified_process="lambda: rcc and dems case validator")
+                    statusIdentifier = str(update_job_status["identifier"])
+                    db_manager.update_job_status(job_id=job_id,status_code=statusIdentifier,job_msg="",last_modified_process="lambda: rcc and dems case validator")
 
                 # create new message on case details queue
-                 queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail']
-                 try:
-                     logger.log(event="calling SQS to add msg ", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
+                queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail']
+                try:
+                        logger.log(event="calling SQS to add msg ", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
                         # Send a message to the queue
-                            response = sqs.send_message(
+                        response = sqs.send_message(
                                 QueueUrl=queue_url,
                                 MessageBody='Cases detected, details stored',
                                 DelaySeconds=0,  # Deliver after 5 seconds
@@ -284,29 +295,29 @@ def lambda_handler(event, context):
                                 MessageAttributes={
                                     'Job_id': {
                                         'DataType': 'String',
-                                        'StringValue': context.aws_request_id
+                                        'StringValue': job_id if 'job_id' in locals() else context.aws_request_id
                                     },
                                     'Source_case_title': {
                                         'DataType': 'String',
-                                        'StringValue': title
+                                        'StringValue': case_title
                                     }      
                                 }
                             )
-                           # logger.log_sqs_message_sent(queue_url = queue_url, message_id=response, )
+                        timestamp = datetime.datetime.now()
+                        logger.log_sqs_message_sent(queue_url = queue_url, message_id=response, message_body={
+                            "timestamp" : timestamp.isoformat(), "level": "INFO", "function" :"axonRccAndDemsCaseValidator",
+                            "event" : "SQSMessageQueued", "message" : "Queued message for Axon Case Detail and Evidence Filter",
+                            "job_id" : job_id,
+                            "source_case_title" : case_title,
+                            "additional_info" : {
+                                "target_queue" : "q-axon-case-detail.fifo",
+                                "message_group_id" : job_id,
+                                "deduplication_id" : "file-" + response 
+                            }
+                           } )
 
-                        except Exception as e:
-                            print(f"Error sending message: {e}")
-
-                # Delete the message
-                #sqs.delete_message(
-                 #   QueueUrl=queue_url,
-                 #   ReceiptHandle=message['ReceiptHandle']
-                #)
-               # logger.log_success(
-                #    event="Message Processed",
-                #    message="SQS message deleted",
-                #    job_id=job_id
-                #)
+                except Exception as e:
+                    print(f"Error sending message: {e}")
 
             except Exception as msg_err:
                 logger.log_error(
