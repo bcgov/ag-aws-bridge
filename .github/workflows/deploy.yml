@@ -51,7 +51,7 @@ jobs:
       if: github.ref == 'refs/heads/develop'
       run: |
         STACK_STATUS=$(aws cloudformation describe-stacks \
-          --stack-name hello-world-lambda-dev \
+          --stack-name BRIDGE-dev-test \
           --region ${{ env.AWS_REGION }} \
           --query 'Stacks[0].StackStatus' \
           --output text 2>/dev/null || echo "DOES_NOT_EXIST")
@@ -59,12 +59,12 @@ jobs:
         if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
           echo "Stack is in ROLLBACK_COMPLETE state. Deleting it first..."
           aws cloudformation delete-stack \
-            --stack-name hello-world-lambda-dev \
+            --stack-name BRIDGE-dev-test \
             --region ${{ env.AWS_REGION }}
           
           echo "Waiting for stack deletion..."
           aws cloudformation wait stack-delete-complete \
-            --stack-name hello-world-lambda-dev \
+            --stack-name BRIDGE-dev-test \
             --region ${{ env.AWS_REGION }}
           
           echo "Stack deleted successfully"
@@ -73,12 +73,12 @@ jobs:
         if [ "$STACK_STATUS" = "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS" ]; then
           echo "Stack is in UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS state. Deleting it first..."
           aws cloudformation delete-stack \
-            --stack-name hello-world-lambda-dev \
+            --stack-name BRIDGE-dev-test \
             --region ${{ env.AWS_REGION }}
           
           echo "Waiting for stack deletion..."
           aws cloudformation wait stack-delete-complete \
-            --stack-name hello-world-lambda-dev \
+            --stack-name BRIDGE-dev-test \
             --region ${{ env.AWS_REGION }}
           
           echo "Stack deleted successfully"
@@ -99,7 +99,7 @@ jobs:
       if: github.ref == 'refs/heads/develop'
       run: |
         sam deploy \
-          --stack-name hello-world-lambda-dev \
+          --stack-name BRIDGE-dev-test \
           --s3-bucket ${{ secrets.SAM_S3_BUCKET }} \
           --s3-prefix dev \
           --region ${{ env.AWS_REGION }} \

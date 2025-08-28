@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  axon-authenticator
+  BRIDGE
 
-  Sample SAM Template for axon-authenticator
+  Sample SAM Template for BRIDGE
 
 Parameters:
   Environment:
@@ -37,26 +37,26 @@ Resources:
         - python3.13
       RetentionPolicy: Retain
 
-  HelloWorldFunction:
-    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
-    Properties:
-      CodeUri: src/lambdas/axon-authenticator/hello_world/
-      Handler: app.lambda_handler
-      Runtime: python3.13
-      Architectures:
-      - x86_64
-      Events:
-        HelloWorld:
-          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
-          Properties:
-            Path: /hello
-            Method: get
-      Layers:
-        - !Ref LambdaStructuredLoggerLayer
-      Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
-      Environment:
-        Variables:
-          ENV_STAGE: !Ref Environment
+  # HelloWorldFunction:
+  #   Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+  #   Properties:
+  #     CodeUri: src/lambdas/axon-authenticator/hello_world/
+  #     Handler: app.lambda_handler
+  #     Runtime: python3.13
+  #     Architectures:
+  #     - x86_64
+  #     Events:
+  #       HelloWorld:
+  #         Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+  #         Properties:
+  #           Path: /hello
+  #           Method: get
+  #     Layers:
+  #       - !Ref LambdaStructuredLoggerLayer
+  #     Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
+  #     Environment:
+  #       Variables:
+  #         ENV_STAGE: !Ref Environment
 
   AxonAuthenticatorFunction:
     Type: AWS::Serverless::Function
@@ -103,14 +103,14 @@ Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  HelloWorldApi:
-    Description: API Gateway endpoint URL for Prod stage for Hello World 
-      function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
-  HelloWorldFunction:
-    Description: Hello World Lambda Function ARN
-    Value: !GetAtt HelloWorldFunction.Arn
-  HelloWorldFunctionIamRole:
+  # HelloWorldApi:
+  #   Description: API Gateway endpoint URL for Prod stage for Hello World 
+  #     function
+  #   Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/hello/"
+  # HelloWorldFunction:
+  #   Description: Hello World Lambda Function ARN
+  #   Value: !GetAtt HelloWorldFunction.Arn
+  AxonAuthenticatorFunctionIamRole:
     Description: "bridge axon authenticator Lambda Execution Role ARN"
     Value: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
   AxonAuthenticatorFunction:
