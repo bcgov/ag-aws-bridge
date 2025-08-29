@@ -2,6 +2,7 @@ import json
 import os
 import boto3
 import requests
+import time
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 from botocore.exceptions import ClientError
@@ -11,7 +12,7 @@ from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 ssm_client = boto3.client("ssm")
 
 
-def get_ssm_parameters(env_stage, logger, event, context_data=None):
+def get_ssm_parameters(env_stage, logger: LambdaStructuredLogger, event, context_data=None):
     """
     Retrieve required SSM parameters for the given environment stage.
 
@@ -36,21 +37,9 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
         "client_secret": f"/{env_stage}/axon/api/client_secret",
     }
 
-    logger.log(
-        event=event,
-        level=LogLevel.INFO,
-        status=LogStatus.SUCCESS,
-        message="log_ssm_parameter_collection",
-        context_data={
-            **context_data,
-            "env_stage": env_stage,
-            "parameter_paths": list(parameter_paths.values()),
-            "operation": "ssm_parameter_retrieval_start",
-        },
-    )
-
     parameters = {}
     failed_parameters = []
+    start_time = time.time()
 
     try:
         # Get all parameters in batch (more efficient than individual calls)
@@ -60,6 +49,9 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
             Names=parameter_names,
             WithDecryption=True,  # This will decrypt SecureString parameters
         )
+
+        # Calculate response time
+        response_time_ms = (time.time() - start_time) * 1000
 
         # Process successful parameters
         for param in response.get("Parameters", []):
@@ -96,24 +88,19 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
 
             raise ValueError(f"Failed to retrieve SSM parameters: {failed_parameters}")
 
-        # Log successful retrieval
-        logger.log(
-            event=event,
-            level=LogLevel.INFO,
-            status=LogStatus.SUCCESS,
-            message="log_ssm_parameter_collection",
-            context_data={
-                **context_data,
-                "env_stage": env_stage,
-                "retrieved_parameters": list(parameters.keys()),
-                "parameter_count": len(parameters),
-                "operation": "ssm_parameter_retrieval_success",
-            },
+        # Log retrieval status
+        logger.log_ssm_parameter_collection(
+            parameter_names=list(parameters.keys()),
+            parameters_collected=parameters,
+            response_time_ms=response_time_ms,
+            invalid_parameters=failed_parameters if failed_parameters else None,
+            **context_data
         )
 
         return parameters
 
     except ClientError as e:
+        response_time_ms = (time.time() - start_time) * 1000
         error_code = e.response["Error"]["Code"]
         error_message = e.response["Error"]["Message"]
 
@@ -129,12 +116,14 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
                 "error_message": error_message,
                 "failed_parameters": parameter_names,
                 "operation": "ssm_parameter_retrieval_client_error",
+                "response_time_ms": response_time_ms,
             },
         )
 
         raise Exception(f"SSM Client Error: {error_code} - {error_message}")
 
     except Exception as e:
+        response_time_ms = (time.time() - start_time) * 1000
         logger.log(
             event=event,
             level=LogLevel.ERROR,
@@ -146,13 +135,14 @@ def get_ssm_parameters(env_stage, logger, event, context_data=None):
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "operation": "ssm_parameter_retrieval_unexpected_error",
+                "response_time_ms": response_time_ms,
             },
         )
 
         raise
 
 
-def store_access_token(env_stage, access_token, token_data, logger, event, context_data=None):
+def store_access_token(env_stage, access_token, token_data, logger: LambdaStructuredLogger, event, context_data=None):
     """
     Store the access token in SSM Parameter Store as a SecureString.
 
@@ -199,6 +189,9 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
             description += f" (expires on {expiry_readable})"
             print(description)
 
+        # Record start time for response time calculation
+        start_time = time.time()
+
         # Store the token as a SecureString
         response = ssm_client.put_parameter(
             Name=bearer_parameter_name,
@@ -206,6 +199,19 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
             Type="SecureString",
             Description=description,
             Overwrite=True,  # Allow overwriting existing parameter
+        )
+
+        # Calculate response time
+        end_time = time.time()
+        response_time_ms = (end_time - start_time) * 1000
+
+        # Log the SSM secure string store operation
+        logger.log_ssm_secure_string_store(
+            parameter_name=bearer_parameter_name,
+            response_time_ms=response_time_ms,
+            parameter_version=response.get("Version"),
+            overwrite=True,
+            **context_data
         )
 
         # Log successful storage
@@ -220,6 +226,7 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
                 "parameter_version": response.get("Version"),
                 "parameter_tier": response.get("Tier"),
                 "token_length": len(access_token),
+                "response_time_ms": response_time_ms,
                 "operation": "token_storage_success",
             },
         )
@@ -227,8 +234,23 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
         return True
 
     except ClientError as e:
+        # Calculate response time for error case
+        end_time = time.time()
+        response_time_ms = (end_time - start_time) * 1000 if 'start_time' in locals() else 0
+
         error_code = e.response["Error"]["Code"]
         error_message = e.response["Error"]["Message"]
+
+        # Log the SSM secure string store operation for error case
+        logger.log_ssm_secure_string_store(
+            parameter_name=bearer_parameter_name,
+            response_time_ms=response_time_ms,
+            parameter_version=None,
+            overwrite=True,
+            error_code=error_code,
+            error_message=error_message,
+            **context_data
+        )
 
         logger.log(
             event=event,
@@ -240,6 +262,7 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
                 "parameter_name": bearer_parameter_name,
                 "error_code": error_code,
                 "error_message": error_message,
+                "response_time_ms": response_time_ms,
                 "operation": "token_storage_client_error",
             },
         )
@@ -247,6 +270,21 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
         raise Exception(f"SSM Client Error during token storage: {error_code} - {error_message}")
 
     except Exception as e:
+        # Calculate response time for error case
+        end_time = time.time()
+        response_time_ms = (end_time - start_time) * 1000 if 'start_time' in locals() else 0
+
+        # Log the SSM secure string store operation for unexpected error
+        logger.log_ssm_secure_string_store(
+            parameter_name=bearer_parameter_name,
+            response_time_ms=response_time_ms,
+            parameter_version=None,
+            overwrite=True,
+            error=str(e),
+            error_type=type(e).__name__,
+            **context_data
+        )
+
         logger.log(
             event=event,
             level=LogLevel.ERROR,
@@ -257,6 +295,7 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
                 "parameter_name": bearer_parameter_name,
                 "error": str(e),
                 "error_type": type(e).__name__,
+                "response_time_ms": response_time_ms,
                 "operation": "token_storage_unexpected_error",
             },
         )
@@ -264,7 +303,7 @@ def store_access_token(env_stage, access_token, token_data, logger, event, conte
         raise
 
 
-def get_access_token(ssm_parameters, logger, event, context_data=None):
+def get_access_token(ssm_parameters, logger: LambdaStructuredLogger, event, context_data=None):
     """
     Retrieve access token from the third-party API using client credentials.
 
@@ -345,6 +384,19 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
             timeout=30  # 30 second timeout
         )
 
+        # Calculate response time in milliseconds
+        response_time_ms = response.elapsed.total_seconds() * 1000
+
+        # Log the API call
+        logger.log_api_call(
+            event=event,
+            url=full_auth_url,
+            method="POST",
+            status_code=response.status_code,
+            response_time=response_time_ms,
+            **context_data
+        )
+
         # Log the response status
         logger.log(
             event=event,
@@ -354,7 +406,7 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
             context_data={
                 **context_data,
                 "status_code": response.status_code,
-                "response_time_ms": response.elapsed.total_seconds() * 1000,
+                "response_time_ms": response_time_ms,
                 "operation": "token_retrieval_response_received",
             },
         )
@@ -421,6 +473,17 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
             raise Exception(f"Token request failed with status {response.status_code}: {error_detail}")
 
     except requests.exceptions.Timeout:
+        # Log API call for timeout
+        logger.log_api_call(
+            event=event,
+            url=full_auth_url,
+            method="POST",
+            status_code=0,
+            response_time=30000,  # timeout duration in ms
+            error="timeout",
+            **context_data
+        )
+        
         logger.log(
             event=event,
             level=LogLevel.ERROR,
@@ -435,6 +498,17 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
         raise Exception("Token request timed out")
 
     except requests.exceptions.ConnectionError:
+        # Log API call for connection error
+        logger.log_api_call(
+            event=event,
+            url=full_auth_url,
+            method="POST",
+            status_code=0,
+            response_time=0,
+            error="connection_error",
+            **context_data
+        )
+        
         logger.log(
             event=event,
             level=LogLevel.ERROR,
@@ -449,6 +523,18 @@ def get_access_token(ssm_parameters, logger, event, context_data=None):
         raise Exception("Failed to connect to authentication server")
 
     except requests.exceptions.RequestException as e:
+        # Log API call for other request exceptions
+        logger.log_api_call(
+            event=event,
+            url=full_auth_url,
+            method="POST",
+            status_code=0,
+            response_time=0,
+            error=str(e),
+            error_type=type(e).__name__,
+            **context_data
+        )
+        
         logger.log(
             event=event,
             level=LogLevel.ERROR,
@@ -519,7 +605,7 @@ def lambda_handler(event, context):
 
     try:
         # Log the start of the function
-        logger.log_start(event="simple_lambda_execution", job_id=request_id)
+        logger.log_start(event="axon_authenticator", job_id=request_id)
 
         # Retrieve SSM parameters
         ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
