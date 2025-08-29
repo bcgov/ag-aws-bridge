@@ -46,13 +46,8 @@ def lambda_handler(event, context):
     parameter_names = [
         f'/{env_stage}/isl_endpoint_url',
         f'/{env_stage}/isl_endpoint_secret',
-        f'/{env_stage}/bridge/sqs-queues/arn_q-transfer-exception',
-        f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail',
-        f'/{env_stage}/bridge/tracking-db/connection-string',
-        f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found',
-        f'/{env_stage}/axon/api/client_id',
-        f'/{env_stage}/axon/api/client_secret',
-        f'/{env_stage}/axon/api/token_url'  # Assuming a parameter for the token URL; add if needed
+        f'/{env_stage}/isl_endpoint/case_id_method',
+        f'/{env_stage}/axon/api/client_id'
     ]
 
     try:
@@ -88,70 +83,36 @@ def lambda_handler(event, context):
         )
         raise
 
-    # Fetch bearer token
-    try:
-        token_url = parameters[f'/{env_stage}/axon/api/token_url']  # Ensure this parameter exists
-        payload = {
-            "client_id": parameters[f'/{env_stage}/axon/api/client_id'],
-            "grant_type": "client_credentials",
-            "client_secret": parameters[f'/{env_stage}/axon/api/client_secret']
-        }
-        encoded_payload = urllib.parse.urlencode(payload).encode('utf-8')
-
-        token_response = http.request(
-            method='POST',
-            url=token_url,
-            body=encoded_payload,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-
-        if token_response.status != 200:
-            raise ValueError(f"Token retrieval failed with status {token_response.status}")
-
-        data = json.loads(token_response.data.decode('utf-8'))
-        bearer_token = data.get("access_token")
-        if not bearer_token:
-            raise ValueError("No access token in response")
-
-        logger.log_success(
-            event="Bearer Token Retrieval",
-            message="Token retrieved successfully",
-            job_id=context.aws_request_id,
-            custom_metadata={"status_code": token_response.status, "url": token_url}
-        )
-    except Exception as e:
-        logger.log_error(
-            event="Bearer Token Retrieval Failed",
-            error=str(e),
-            job_id=context.aws_request_id
-        )
-        raise
-
     # Process SQS messages
     try:
-        queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
-
+        queue_url  = sqs.get_queue_url(QueueName='q-case-found.fifo')['QueueUrl']
+        
         sqs_response = sqs.receive_message(
             QueueUrl=queue_url,
             MaxNumberOfMessages=10,
             WaitTimeSeconds=20,
-            VisibilityTimeout=30
+            VisibilityTimeout=30,
+            MessageAttributeNames=['All']  # Retrieve custom attributes
         )
+        bearer_token = parameters[f'/{env_stage}/isl_endpoint_secret']
 
         if 'Messages' not in sqs_response:
-            logger.log_info(
+            logger.log(
                 event="SQS Poll",
+                status="IN_PROGRESS",
                 message="No messages in queue",
+               
                 job_id=context.aws_request_id
             )
             return {'statusCode': 200, 'body': 'No messages to process'}
 
         for message in sqs_response['Messages']:
             try:
-                body = json.loads(message['Body'])
-                job_id = body.get("job_id")
-                case_title = body.get("Source_case_title")
-
+               
+                body = message.get('MessageAttributes',{})
+                job_id = body.get("Job_id").get('StringValue')
+                case_title = body.get("Source_case_title").get('StringValue')
+                
                 if not job_id or not case_title:
                     raise ValueError("Missing job_id or Source_case_title in message")
 
@@ -164,7 +125,7 @@ def lambda_handler(event, context):
                 agency_file_number = '-'.join(parts[1:]).strip()  # Handle cases with multiple '-'
 
                 # Lookup agency code in DynamoDB
-                logger.log_info(
+                logger.log(
                     event="Agency Code Lookup",
                     status=LogStatus.IN_PROGRESS,
                     message="Retrieving agency code...",
@@ -190,8 +151,9 @@ def lambda_handler(event, context):
 
                 # Log successful lookup
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-                logger.log_info(
+                logger.log(
                     event="Axon Case Agency Lookup",
+                    status="IN_PROGRESS",
                     message="Agency prefix lookup successful",
                     job_id=job_id,
                     custom_metadata={
@@ -202,7 +164,7 @@ def lambda_handler(event, context):
                 )
 
                 # Call DEMS API
-                dems_api_url = parameters[f'/{env_stage}/isl_endpoint_url']
+                dems_api_url = parameters[f'/{env_stage}/isl_endpoint_url'] + parameters[f'/{env_stage}/isl_endpoint/case_id_method']
                 found_dems_case = False
                 agency_codes_to_try = [agency_id_code]
 
@@ -216,7 +178,7 @@ def lambda_handler(event, context):
                         'agencyFileNumber': agency_file_number
                     }
 
-                    logger.log_info(
+                    logger.log(
                         event="DEMS API Call",
                         status=LogStatus.IN_PROGRESS,
                         message=f"Calling DEMS API with agencyIdCode: {code}",
@@ -282,7 +244,8 @@ def lambda_handler(event, context):
                     db_manager.update_job_status(job_id=job_id,status_code=statusIdentifier,job_msg="",last_modified_process="lambda: rcc and dems case validator")
 
                 # create new message on case details queue
-                queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail']
+                queue_url  = sqs.get_queue_url(QueueName='q-case-detail.fifo')['QueueUrl']
+                #queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail']
                 try:
                         logger.log(event="calling SQS to add msg ", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
                         # Send a message to the queue
@@ -303,9 +266,9 @@ def lambda_handler(event, context):
                                     }      
                                 }
                             )
-                        timestamp = datetime.datetime.now()
+                     
                         logger.log_sqs_message_sent(queue_url = queue_url, message_id=response, message_body={
-                            "timestamp" : timestamp.isoformat(), "level": "INFO", "function" :"axonRccAndDemsCaseValidator",
+                            "timestamp" : current_timestamp.isoformat(), "level": "INFO", "function" :"axonRccAndDemsCaseValidator",
                             "event" : "SQSMessageQueued", "message" : "Queued message for Axon Case Detail and Evidence Filter",
                             "job_id" : job_id,
                             "source_case_title" : case_title,
@@ -336,8 +299,9 @@ def lambda_handler(event, context):
         raise
 
     # Log the end of the function
-    logger.log_end(
+    logger.log_success(
         event="Verify Dems Case End",
+        message="Successfully completed axonRccAndDemsCaseValidator execution",
         job_id=context.aws_request_id
     )
 
