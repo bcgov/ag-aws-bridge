@@ -10,299 +10,276 @@ from botocore.config import Config
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
 
-def lambda_handler(event, context):
-    # Initialize the logger
-    logger = LambdaStructuredLogger()
-
-    # Log the start of the function
-    logger.log_start(
-        event="Verify Dems Case Start",
-        job_id=context.aws_request_id
+def initialize_aws_clients(env_stage: str) -> tuple:
+    """Initialize AWS clients and resources with custom configuration."""
+    config = Config(connect_timeout=5, retries={"max_attempts": 5, "mode": "standard"})
+    return (
+        boto3.client("ssm", region_name="ca-central-1", config=config),
+        boto3.client('sqs', region_name="ca-central-1", config=config),
+        boto3.resource("dynamodb", region_name="ca-central-1").Table("agency-lookups")
     )
 
-    # Get environment stage from environment variable
-    env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-
-    # Initialize AWS clients with custom config
-    config = Config(connect_timeout=5, retries={"max_attempts": 5, "mode": "standard"})
-    ssm_client = boto3.client("ssm", region_name="ca-central-1", config=config)
-    sqs = boto3.client('sqs', region_name="ca-central-1", config=config)
-    dynamodb = boto3.resource("dynamodb", region_name="ca-central-1")
-    agency_code_table = dynamodb.Table("agency-lookups")
-    db_manager = get_db_manager(env_param_in=env_stage)
-    db_manager._initialize_pool()
-
-    # Initialize database manager
-    db_manager = get_db_manager(env_param_in=env_stage)
-    db_manager._initialize_pool()
-
-    # Initialize HTTP Connection Pool with retries and timeout
-    http = urllib3.PoolManager(
+def initialize_http_pool() -> urllib3.PoolManager:
+    """Initialize HTTP connection pool with retries and timeout."""
+    return urllib3.PoolManager(
         timeout=urllib3.Timeout(connect=5.0, read=10.0),
         retries=urllib3.Retry(total=3, backoff_factor=1)
     )
 
-    # Define SSM parameter names (fixed trailing spaces and added missing ones for Axon API)
+def get_ssm_parameters(ssm_client, env_stage: str, logger: LambdaStructuredLogger, job_id: str) -> dict:
+    """Retrieve and process SSM parameters."""
     parameter_names = [
         f'/{env_stage}/isl_endpoint_url',
         f'/{env_stage}/isl_endpoint_secret',
         f'/{env_stage}/isl_endpoint/case_id_method',
         f'/{env_stage}/axon/api/client_id'
     ]
-
+    
     try:
-        # Retrieve multiple parameters at once
-        ssm_response = ssm_client.get_parameters(
-            Names=parameter_names,
-            WithDecryption=True
-        )
-        
-        # Process into a dictionary
+        ssm_response = ssm_client.get_parameters(Names=parameter_names, WithDecryption=True)
         parameters = {param['Name']: param['Value'] for param in ssm_response['Parameters']}
-
+        
         if ssm_response.get('InvalidParameters'):
-            invalid_params = ssm_response['InvalidParameters']
             logger.log_error(
                 event="SSM Param Retrieval",
-                error=f"Failed to retrieve parameters: {invalid_params}",
-                job_id=context.aws_request_id
+                error=f"Failed to retrieve parameters: {ssm_response['InvalidParameters']}",
+                job_id=job_id
             )
-            raise ValueError(f"Failed to retrieve some parameters: {invalid_params}")
+            raise ValueError(f"Failed to retrieve some parameters: {ssm_response['InvalidParameters']}")
         
         logger.log_success(
             event="SSM Param Retrieval",
             message="Parameters collected successfully",
-            job_id=context.aws_request_id,
+            job_id=job_id,
             custom_metadata={"parameter_names": parameter_names}
         )
+        return parameters
     except Exception as e:
-        logger.log_error(
-            event="SSM Param Retrieval Failed",
-            error=str(e),
-            job_id=context.aws_request_id
-        )
+        logger.log_error(event="SSM Param Retrieval Failed", error=str(e), job_id=job_id)
         raise
 
-    # Process SQS messages
+def receive_sqs_messages(sqs_client, queue_name: str, logger: LambdaStructuredLogger, job_id: str) -> list:
+    """Receive messages from SQS queue."""
     try:
-        queue_url  = sqs.get_queue_url(QueueName='q-case-found.fifo')['QueueUrl']
-        
-        sqs_response = sqs.receive_message(
+        queue_url = sqs_client.get_queue_url(QueueName=queue_name)['QueueUrl']
+        sqs_response = sqs_client.receive_message(
             QueueUrl=queue_url,
             MaxNumberOfMessages=10,
             WaitTimeSeconds=20,
             VisibilityTimeout=30,
-            MessageAttributeNames=['All']  # Retrieve custom attributes
+            MessageAttributeNames=['All']
         )
-        bearer_token = parameters[f'/{env_stage}/isl_endpoint_secret']
-
-        if 'Messages' not in sqs_response:
-            logger.log(
-                event="SQS Poll",
-                status="IN_PROGRESS",
-                message="No messages in queue",
-               
-                job_id=context.aws_request_id
-            )
-            return {'statusCode': 200, 'body': 'No messages to process'}
-
-        for message in sqs_response['Messages']:
-            try:
-               
-                body = message.get('MessageAttributes',{})
-                job_id = body.get("Job_id").get('StringValue')
-                case_title = body.get("Source_case_title").get('StringValue')
-                
-                if not job_id or not case_title:
-                    raise ValueError("Missing job_id or Source_case_title in message")
-
-                # Parse agency from case_title
-                parts = case_title.split('-')
-                if len(parts) < 2:
-                    raise ValueError("Invalid case_title format")
-
-                rms_jur_id = parts[0].strip()
-                agency_file_number = '-'.join(parts[1:]).strip()  # Handle cases with multiple '-'
-
-                # Lookup agency code in DynamoDB
-                logger.log(
-                    event="Agency Code Lookup",
-                    status=LogStatus.IN_PROGRESS,
-                    message="Retrieving agency code...",
-                    job_id=job_id
-                )
-                dynamo_response = agency_code_table.get_item(
-                    Key={'rmsJurId': rms_jur_id}
-                )
-
-                item = dynamo_response.get('Item')
-                if not item:
-                    logger.log_error(
-                        event="Agency Code Lookup Failed",
-                        error=f"No item found for rmsJurId: {rms_jur_id}",
-                        job_id=job_id
-                    )
-                    # Optionally send to DLQ or continue
-                    continue
-
-                agency_id_code = item.get('bcpsAgencyIdCode', '')
-                sub_agency_yn = item.get('subAgencyYN', 'N')
-                sub_agencies = item.get('subAgencies', [])  # Assuming subAgencies is a list of strings
-
-                # Log successful lookup
-                current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-                logger.log(
-                    event="Axon Case Agency Lookup",
-                    status="IN_PROGRESS",
-                    message="Agency prefix lookup successful",
-                    job_id=job_id,
-                    custom_metadata={
-                        "rms_jur_id": rms_jur_id,
-                        "agency_id_code": agency_id_code,
-                        "agency_file_number": agency_file_number
-                    }
-                )
-
-                # Call DEMS API
-                dems_api_url = parameters[f'/{env_stage}/isl_endpoint_url'] + parameters[f'/{env_stage}/isl_endpoint/case_id_method']
-                found_dems_case = False
-                agency_codes_to_try = [agency_id_code]
-
-                if sub_agency_yn == 'Y' and sub_agencies:
-                    agency_codes_to_try.extend(sub_agencies)
-
-                for code in agency_codes_to_try:
-                    headers = {
-                        'Authorization': f"Bearer {bearer_token}",
-                        'agencyIdCode': code,
-                        'agencyFileNumber': agency_file_number
-                    }
-
-                    logger.log(
-                        event="DEMS API Call",
-                        status=LogStatus.IN_PROGRESS,
-                        message=f"Calling DEMS API with agencyIdCode: {code}",
-                        job_id=job_id
-                    )
-
-                    start_time = time.perf_counter()
-                    api_response = http.request(
-                        'GET',
-                        dems_api_url,
-                        headers=headers
-                    )
-                    response_time = time.perf_counter() - start_time
-                   
-                    logger.log_api_call(
-                        event="DEMS ISL Get Cases",
-                        url=dems_api_url,
-                        method="GET",
-                        status_code=api_response.status,
-                        response_time=response_time,
-                        job_id=job_id
-                    )
-
-                    if api_response.status == 200:
-                        dems_case_id = api_response.data.decode('utf-8').strip()
-                        if dems_case_id:
-                            db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
-                            found_dems_case = True
-                            logger.log_success(
-                                event="DEMS Case Found",
-                                message=f"DEMS case ID: {dems_case_id}",
-                                job_id=job_id
-                            )
-                            break
-                    elif api_response.status >= 400:
-                        logger.log_error(
-                            event="DEMS API Error",
-                            error=f"HTTP error: {api_response.status}",
-                            job_id=job_id
-                        )
-
-                if not found_dems_case:
-                    logger.log(
-                        event="axonRccAndDemsCaseValidator",
-                        status = "ERROR",
-                        message="Agency prefix lookup unsuccessful - not matched",
-                        job_id=job_id,
-                        additional_info={
-                            "rms_jur_id" : rms_jur_id,
-                            "agencyFileNumber" : agency_file_number
-                        }
-                    )
-                    update_job_status = db_manager.get_status_code_by_value(value="INVALID-AGENCY-IDENTIFIER")
-                    if update_job_status:
-                        statusIdentifier = str(update_job_status["identifier"])
-                        db_manager.update_job_status(job_id=job_id,status_code=statusIdentifier,job_msg="",last_modified_process="lambda: rcc and dems case validator")
-
-
-                    # Optionally send to exception queue
-                update_job_status = db_manager.get_status_code_by_value(value="VALID-CASE")
-                if update_job_status:
-                    statusIdentifier = str(update_job_status["identifier"])
-                    db_manager.update_job_status(job_id=job_id,status_code=statusIdentifier,job_msg="",last_modified_process="lambda: rcc and dems case validator")
-
-                # create new message on case details queue
-                queue_url  = sqs.get_queue_url(QueueName='q-case-detail.fifo')['QueueUrl']
-                #queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-detail']
-                try:
-                        logger.log(event="calling SQS to add msg ", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
-                        # Send a message to the queue
-                        response = sqs.send_message(
-                                QueueUrl=queue_url,
-                                MessageBody='Cases detected, details stored',
-                                DelaySeconds=0,  # Deliver after 5 seconds
-                                MessageGroupId="axon-evidence-transfer",
-                                MessageDuplicationId=job_id,
-                                MessageAttributes={
-                                    'Job_id': {
-                                        'DataType': 'String',
-                                        'StringValue': job_id if 'job_id' in locals() else context.aws_request_id
-                                    },
-                                    'Source_case_title': {
-                                        'DataType': 'String',
-                                        'StringValue': case_title
-                                    }      
-                                }
-                            )
-                     
-                        logger.log_sqs_message_sent(queue_url = queue_url, message_id=response, message_body={
-                            "timestamp" : current_timestamp.isoformat(), "level": "INFO", "function" :"axonRccAndDemsCaseValidator",
-                            "event" : "SQSMessageQueued", "message" : "Queued message for Axon Case Detail and Evidence Filter",
-                            "job_id" : job_id,
-                            "source_case_title" : case_title,
-                            "additional_info" : {
-                                "target_queue" : "q-axon-case-detail.fifo",
-                                "message_group_id" : job_id,
-                                "deduplication_id" : "file-" + response 
-                            }
-                           } )
-
-                except Exception as e:
-                    print(f"Error sending message: {e}")
-
-            except Exception as msg_err:
-                logger.log_error(
-                    event="Message Processing Failed",
-                    error=str(msg_err),
-                    job_id=job_id if 'job_id' in locals() else context.aws_request_id
-                )
-                # Optionally: do not delete message or send to DLQ
-
+        return sqs_response.get('Messages', [])
     except Exception as e:
-        logger.log_error(
-            event="SQS Processing Failed",
-            error=str(e),
-            job_id=context.aws_request_id
-        )
+        logger.log_error(event="SQS Processing Failed", error=str(e), job_id=job_id)
         raise
 
-    # Log the end of the function
-    logger.log_success(
-        event="Verify Dems Case End",
-        message="Successfully completed axonRccAndDemsCaseValidator execution",
-        job_id=context.aws_request_id
+def parse_message_attributes(message: dict) -> tuple:
+    """Parse job_id and case_title from SQS message attributes."""
+    body = message.get('MessageAttributes', {})
+    job_id = body.get("Job_id", {}).get('StringValue')
+    case_title = body.get("Source_case_title", {}).get('StringValue')
+    
+    if not job_id or not case_title:
+        raise ValueError("Missing job_id or Source_case_title in message")
+    
+    return job_id, case_title
+
+def parse_case_title(case_title: str) -> tuple:
+    """Parse agency and file number from case title."""
+    parts = case_title.split('-')
+    if len(parts) < 2:
+        raise ValueError("Invalid case_title format")
+    
+    return parts[0].strip(), '-'.join(parts[1:]).strip()
+
+def lookup_agency_code(agency_code_table, rms_jur_id: str, logger: LambdaStructuredLogger, job_id: str) -> tuple:
+    """Lookup agency code in DynamoDB."""
+    logger.log(event="Agency Code Lookup", status=LogStatus.IN_PROGRESS, message="Retrieving agency code...", job_id=job_id)
+    
+    dynamo_response = agency_code_table.get_item(Key={'rmsJurId': rms_jur_id})
+    item = dynamo_response.get('Item')
+    
+    if not item:
+        logger.log_error(event="Agency Code Lookup Failed", error=f"No item found for rmsJurId: {rms_jur_id}", job_id=job_id)
+        return None, None, None
+    
+    return (
+        item.get('bcpsAgencyIdCode', ''),
+        item.get('subAgencyYN', 'N'),
+        item.get('subAgencies', [])
     )
 
-    return {'statusCode': 200, 'body': 'Processing complete'}
+def call_dems_api(http: urllib3.PoolManager, dems_api_url: str, bearer_token: str, agency_code: str,
+                 agency_file_number: str, logger: LambdaStructuredLogger, job_id: str) -> tuple:
+    """Call DEMS API and return response status and data."""
+    headers = {
+        'Authorization': f"Bearer {bearer_token}",
+        'agencyIdCode': agency_code,
+        'agencyFileNumber': agency_file_number
+    }
+    
+    logger.log(event="DEMS API Call", status=LogStatus.IN_PROGRESS, message=f"Calling DEMS API with agencyIdCode: {agency_code}", job_id=job_id)
+    
+    start_time = time.perf_counter()
+    api_response = http.request('GET', dems_api_url, headers=headers)
+    response_time = time.perf_counter() - start_time
+    
+    logger.log_api_call(
+        event="DEMS ISL Get Cases",
+        url=dems_api_url,
+        method="GET",
+        status_code=api_response.status,
+        response_time=response_time,
+        job_id=job_id
+    )
+    
+    return api_response.status, api_response.data.decode('utf-8').strip()
+
+def update_job_status(db_manager: DatabaseManager, job_id: str, status_value: str, logger: LambdaStructuredLogger):
+    """Update job status in the database."""
+    update_job_status = db_manager.get_status_code_by_value(value=status_value)
+    if update_job_status:
+        status_identifier = str(update_job_status["identifier"])
+        db_manager.update_job_status(
+            job_id=job_id,
+            status_code=status_identifier,
+            job_msg="",
+            last_modified_process="lambda: rcc and dems case validator"
+        )
+
+def send_sqs_message(sqs_client, queue_name: str, job_id: str, case_title: str,
+                    logger: LambdaStructuredLogger, current_timestamp: str):
+    """Send message to SQS queue."""
+    try:
+        queue_url = sqs_client.get_queue_url(QueueName=queue_name)['QueueUrl']
+        logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
+        
+        response = sqs_client.send_message(
+            QueueUrl=queue_url,
+            MessageBody='Cases detected, details stored',
+            DelaySeconds=0,
+            MessageGroupId="axon-evidence-transfer",
+            MessageDeduplicationId=job_id,
+            MessageAttributes={
+                'Job_id': {'DataType': 'String', 'StringValue': job_id},
+                'Source_case_title': {'DataType': 'String', 'StringValue': case_title}
+            }
+        )
+        
+        logger.log_sqs_message_sent(
+            queue_url=queue_url,
+            message_id=response,
+            message_body={
+                "timestamp": current_timestamp,
+                "level": "INFO",
+                "function": "axonRccAndDemsCaseValidator",
+                "event": "SQSMessageQueued",
+                "message": "Queued message for Axon Case Detail and Evidence Filter",
+                "job_id": job_id,
+                "source_case_title": case_title,
+                "additional_info": {
+                    "target_queue": "q-axon-case-detail.fifo",
+                    "message_group_id": job_id,
+                    "deduplication_id": "file-" + response
+                }
+            }
+        )
+    except Exception as e:
+        logger.log_error(event="SQS Message Send Failed", error=str(e), job_id=job_id)
+
+def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, agency_code_table,
+                   db_manager: DatabaseManager, sqs_client, logger: LambdaStructuredLogger):
+    """Process a single SQS message."""
+    try:
+        # Get environment stage from environment variable
+        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+        job_id, case_title = parse_message_attributes(message)
+        rms_jur_id, agency_file_number = parse_case_title(case_title)
+        
+        agency_id_code, sub_agency_yn, sub_agencies = lookup_agency_code(agency_code_table, rms_jur_id, logger, job_id)
+        if not agency_id_code:
+            return
+        
+        logger.log(
+            event="Axon Case Agency Lookup",
+            status="IN_PROGRESS",
+            message="Agency prefix lookup successful",
+            job_id=job_id,
+            custom_metadata={
+                "rms_jur_id": rms_jur_id,
+                "agency_id_code": agency_id_code,
+                "agency_file_number": agency_file_number
+            }
+        )
+        
+        dems_api_url = parameters[f'/{env_stage}/isl_endpoint_url'] + parameters[f'/{env_stage}/isl_endpoint/case_id_method']
+        bearer_token = parameters[f'/{env_stage}/isl_endpoint_secret']
+        agency_codes_to_try = [agency_id_code] + (sub_agencies if sub_agency_yn == 'Y' else [])
+        
+        found_dems_case = False
+        for code in agency_codes_to_try:
+            status, dems_case_id = call_dems_api(http, dems_api_url, bearer_token, code, agency_file_number, logger, job_id)
+            
+            if status == 200 and dems_case_id:
+                db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
+                logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
+                found_dems_case = True
+                break
+            elif status >= 400:
+                logger.log_error(event="DEMS API Error", error=f"HTTP error: {status}", job_id=job_id)
+        
+        status_value = "VALID-CASE" if found_dems_case else "INVALID-AGENCY-IDENTIFIER"
+        update_job_status(db_manager, job_id, status_value, logger)
+        
+        if found_dems_case:
+            current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+            send_sqs_message(sqs_client, 'q-case-detail.fifo', job_id, case_title, logger, current_timestamp)
+        
+        if not found_dems_case:
+            logger.log(
+                event="axonRccAndDemsCaseValidator",
+                status="ERROR",
+                message="Agency prefix lookup unsuccessful - not matched",
+                job_id=job_id,
+                additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
+            )
+            
+    except Exception as msg_err:
+        logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=job_id)
+
+def lambda_handler(event, context):
+    # Get environment stage from environment variable
+    env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+
+    """Main Lambda handler function."""
+    logger = LambdaStructuredLogger()
+    logger.log_start(event="Verify Dems Case Start", job_id=context.aws_request_id)
+    
+    env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+    ssm_client, sqs_client, agency_code_table = initialize_aws_clients(env_stage)
+    db_manager = get_db_manager(env_param_in=env_stage)
+    db_manager._initialize_pool()
+    http = initialize_http_pool()
+    
+    try:
+        parameters = get_ssm_parameters(ssm_client, env_stage, logger, context.aws_request_id)
+        messages = receive_sqs_messages(sqs_client, 'q-case-found.fifo', logger, context.aws_request_id)
+        
+        if not messages:
+            logger.log(event="SQS Poll", status="IN_PROGRESS", message="No messages in queue", job_id=context.aws_request_id)
+            return {'statusCode': 200, 'body': 'No messages to process'}
+        
+        for message in messages:
+            process_message(message, parameters, http, agency_code_table, db_manager, sqs_client, logger)
+        
+        logger.log_success(
+            event="Verify Dems Case End",
+            message="Successfully completed axonRccAndDemsCaseValidator execution",
+            job_id=context.aws_request_id
+        )
+        return {'statusCode': 200, 'body': 'Processing complete'}
+    
+    except Exception as e:
+        logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=context.aws_request_id)
+        raise
