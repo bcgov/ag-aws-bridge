@@ -394,7 +394,7 @@ def get_access_token(ssm_parameters, logger: LambdaStructuredLogger, event, cont
             method="POST",
             status_code=response.status_code,
             response_time=response_time_ms,
-            **context_data
+            # **context_data
         )
 
         # Log the response status
@@ -481,7 +481,7 @@ def get_access_token(ssm_parameters, logger: LambdaStructuredLogger, event, cont
             status_code=0,
             response_time=30000,  # timeout duration in ms
             error="timeout",
-            **context_data
+            # **context_data
         )
         
         logger.log(
@@ -506,7 +506,7 @@ def get_access_token(ssm_parameters, logger: LambdaStructuredLogger, event, cont
             status_code=0,
             response_time=0,
             error="connection_error",
-            **context_data
+            # **context_data
         )
         
         logger.log(
@@ -532,7 +532,7 @@ def get_access_token(ssm_parameters, logger: LambdaStructuredLogger, event, cont
             response_time=0,
             error=str(e),
             error_type=type(e).__name__,
-            **context_data
+            # **context_data
         )
         
         logger.log(
