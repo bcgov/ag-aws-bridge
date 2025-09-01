@@ -34,7 +34,6 @@ jobs:
         use-installer: true
 
     - name: Configure AWS credentials (Dev)
-      if: github.ref == 'refs/heads/develop'
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ secrets.AWS_DEV_ROLE_ARN }}
@@ -48,7 +47,6 @@ jobs:
         echo "AWS Region: $AWS_REGION"
 
     - name: Check and handle failed stack state (Dev)
-      if: github.ref == 'refs/heads/develop'
       run: |
         STACK_STATUS=$(aws cloudformation describe-stacks \
           --stack-name BRIDGE-dev-test \
@@ -110,7 +108,6 @@ jobs:
       run: sam build --use-container
 
     - name: SAM Deploy (Development)
-      if: github.ref == 'refs/heads/develop'
       run: |
         sam deploy \
           --stack-name BRIDGE-dev-test \
