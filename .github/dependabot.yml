@@ -1,0 +1,40 @@
+version: 2
+updates:
+  # Python dependencies for Lambda functions
+  - package-ecosystem: "pip"
+    directory: "/src/lambdas/axon-authenticator/hello_world"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/src/layers/lambda_structured_logger"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/src/lambdas/axon-authenticator/tests"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+      - "testing"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "github-actions"
