@@ -1,0 +1,9 @@
+{
+  "test_type": "real_token_generation",
+  "requestContext": {
+    "requestId": "test-request-id-123"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "version": "0",
+  "id": "53dc4d37-cffa-4f76-80c9-8b7d4a4d2eaa",
+  "detail-type": "Scheduled Event",
+  "source": "aws.scheduler",
+  "account": "731386536779",
+  "time": "2025-08-21T15:00:00Z",
+  "region": "ca-central-1",
+  "resources": [
+    "arn:aws:scheduler:ca-central-1:731386536779:schedule/default/axon-token-refresh"
+  ],
+  "detail": {
+    "state": "ENABLED"
+  }
+}

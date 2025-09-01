@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SAM Template for BRIDGE
+
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev-test
+    AllowedValues:
+      - dev-test
+      - prod
+    Description: Environment name
+
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 30
+    Tracing: Active
+    # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
+    LoggingConfig:
+      LogFormat: JSON
+  Api:
+    TracingEnabled: true
+
+
+Resources:
+  # Logger layer
+  LambdaStructuredLoggerLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: lambda-structured-logger
+      ContentUri: src/layers/lambda_structured_logger/
+      CompatibleRuntimes:
+        - python3.11
+        - python3.13
+      RetentionPolicy: Retain
+
+  AxonAuthenticatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/lambdas/axon-authenticator/hello_world/
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+        - x86_64
+      Timeout: 120
+      Events:
+        TokenRefreshSchedule:
+          Type: ScheduleV2
+          Properties:
+            Description: "Refresh Axon API token every 3 hours"
+            ScheduleExpression: "rate(3 hours)"
+            ScheduleExpressionTimezone: "UTC"
+            State: ENABLED
+            FlexibleTimeWindow:
+              Mode: "OFF"
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+      Layers:
+        - !Ref LambdaStructuredLoggerLayer
+      Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
+      Environment:
+        Variables:
+          ENV_STAGE: !Ref Environment
+      # DeadLetterQueue:
+      #   Type: SQS
+      #   TargetArn: !GetAtt TokenRefreshDLQ.Arn
+
+  # # Dead Letter Queue for failed token refresh attempts
+  # TokenRefreshDLQ:
+  #   Type: AWS::SQS::Queue
+  #   Properties:
+  #     QueueName: !Sub "axon-token-refresh-dlq-${Environment}"
+  #     MessageRetentionPeriod: 1209600  # 14 days
+  #     Tags:
+  #       - Key: Environment
+  #         Value: !Ref Environment
+  #       - Key: Purpose
+  #         Value: "Token refresh failure handling"
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Ref: ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+
+
+Outputs:
+  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
+  # Find out more about other implicit resources you can reference within SAM
+  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
+  AxonAuthenticatorFunctionIamRole:
+    Description: "bridge axon authenticator Lambda Execution Role ARN"
+    Value: !Sub "arn:aws:iam::731386536779:role/bridge-axon-authenticator-role"
+
+  AxonAuthenticatorFunction:
+    Description: Axon Authenticator Lambda Function ARN
+    Value: !GetAtt AxonAuthenticatorFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AxonAuthenticatorFunction"
+
+  ScheduleExpression:
+    Description: Schedule expression for token refresh
+    Value: "rate(3 hours)"
+
+  # TokenRefreshDLQ:
+  #   Description: Dead Letter Queue for failed token refresh attempts
+  #   Value: !Ref TokenRefreshDLQ
+  #   Export:
+  #     Name: !Sub "${AWS::StackName}-TokenRefreshDLQ"

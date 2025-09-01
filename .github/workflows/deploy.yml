@@ -1,0 +1,120 @@
+name: Deploy SAM Application
+
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read    # Required for actions/checkout
+
+env:
+  AWS_REGION: ca-central-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+
+    - name: Setup SAM CLI
+      uses: aws-actions/setup-sam@v2
+      with:
+        use-installer: true
+
+    - name: Configure AWS credentials (Dev)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_DEV_ROLE_ARN }}
+        role-session-name: GitHubActions-SAM-Deploy-Dev
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Verify AWS Identity
+      run: |
+        echo "Current AWS Identity:"
+        aws sts get-caller-identity
+        echo "AWS Region: $AWS_REGION"
+
+    - name: Check and handle failed stack state (Dev)
+      run: |
+        STACK_STATUS=$(aws cloudformation describe-stacks \
+          --stack-name BRIDGE-dev-test \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Stacks[0].StackStatus' \
+          --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+        
+        if [ "$STACK_STATUS" = "ROLLBACK_COMPLETE" ]; then
+          echo "Stack is in ROLLBACK_COMPLETE state. Deleting it first..."
+          aws cloudformation delete-stack \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Stack deleted successfully"
+        fi
+        
+        if [ "$STACK_STATUS" = "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS" ]; then
+          echo "Stack is in UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS state. Deleting it first..."
+          aws cloudformation delete-stack \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Stack deleted successfully"
+        fi
+
+        if [ "$STACK_STATUS" = "ROLLBACK_FAILED" ]; then
+          echo "Stack is in ROLLBACK_FAILED state. Deleting it first..."
+          aws cloudformation delete-stack \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Waiting for stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name BRIDGE-dev-test \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "Stack deleted successfully"
+        fi
+        
+    - name: Cache SAM build
+      uses: actions/cache@v3
+      with:
+        path: .aws-sam
+        key: ${{ runner.os }}-sam-${{ hashFiles('**/template.yaml') }}-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-sam-
+
+    - name: SAM Build
+      run: sam build --use-container
+
+    - name: SAM Deploy (Development)
+      run: |
+        sam deploy \
+          --stack-name BRIDGE-dev-test \
+          --s3-bucket ${{ secrets.SAM_S3_BUCKET }} \
+          --s3-prefix dev \
+          --region ${{ env.AWS_REGION }} \
+          --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --parameter-overrides Environment=dev-test
