@@ -4,11 +4,14 @@ import urllib3
 import urllib.parse
 import os
 import time
+import botocore.exceptions
+
 from datetime import datetime, timezone, timedelta
 from botocore.config import Config
 
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
+
 
 def initialize_aws_clients(env_stage: str) -> tuple:
     """Initialize AWS clients and resources with custom configuration."""
@@ -70,9 +73,13 @@ def receive_sqs_messages(sqs_client, queue_name: str, logger: LambdaStructuredLo
             MessageAttributeNames=['All']
         )
         return sqs_response.get('Messages', [])
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        logger.error(f"ClientError receiving message: {error_code} - {str(e)}")
+        raise  # Re-raise to trigger retry
     except Exception as e:
-        logger.log_error(event="SQS Processing Failed", error=str(e), job_id=job_id)
-        raise
+        logger.error(f"Unexpected error: {str(e)}")
+        raise  # Re-raise non-retryable errors
 
 def parse_message_attributes(message: dict) -> tuple:
     """Parse job_id and case_title from SQS message attributes."""
@@ -102,6 +109,7 @@ def lookup_agency_code(agency_code_table, rms_jur_id: str, logger: LambdaStructu
     
     if not item:
         logger.log_error(event="Agency Code Lookup Failed", error=f"No item found for rmsJurId: {rms_jur_id}", job_id=job_id)
+
         return None, None, None
     
     return (
@@ -149,22 +157,30 @@ def update_job_status(db_manager: DatabaseManager, job_id: str, status_value: st
         )
 
 def send_sqs_message(sqs_client, queue_name: str, job_id: str, case_title: str,
-                    logger: LambdaStructuredLogger, current_timestamp: str):
+                    logger: LambdaStructuredLogger, current_timestamp: str, custom_exception: Exception= None):
     """Send message to SQS queue."""
     try:
         queue_url = sqs_client.get_queue_url(QueueName=queue_name)['QueueUrl']
         logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
         
+        message_attributes ={
+                'Job_id': {'DataType': 'String', 'StringValue': job_id},
+                'Source_case_title': {'DataType': 'String', 'StringValue': case_title}
+        }
+        # Add exception message to message attributes if custom_exception is provided
+        if custom_exception:
+            message_attributes['ExceptionMessage'] = {
+                'DataType': 'String',
+                'StringValue': str(custom_exception)[:256]  # SQS message attributes have a 256-byte limit
+            }
+
         response = sqs_client.send_message(
             QueueUrl=queue_url,
-            MessageBody='Cases detected, details stored',
+            MessageBody='Sending SQS message to ' + queue_name,
             DelaySeconds=0,
             MessageGroupId="axon-evidence-transfer",
             MessageDeduplicationId=job_id,
-            MessageAttributes={
-                'Job_id': {'DataType': 'String', 'StringValue': job_id},
-                'Source_case_title': {'DataType': 'String', 'StringValue': case_title}
-            }
+            MessageAttributes=message_attributes
         )
         
         logger.log_sqs_message_sent(
@@ -179,7 +195,7 @@ def send_sqs_message(sqs_client, queue_name: str, job_id: str, case_title: str,
                 "job_id": job_id,
                 "source_case_title": case_title,
                 "additional_info": {
-                    "target_queue": "q-axon-case-detail.fifo",
+                    "target_queue":queue_name,
                     "message_group_id": job_id,
                     "deduplication_id": "file-" + response
                 }
@@ -199,6 +215,9 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
         
         agency_id_code, sub_agency_yn, sub_agencies = lookup_agency_code(agency_code_table, rms_jur_id, logger, job_id)
         if not agency_id_code:
+            status_value =  "INVALID-AGENCY-IDENTIFIER"
+            update_job_status(db_manager, job_id, status_value, logger)
+            send_sqs_message(sqs_client, 'q-transfer-exception', job_id, case_title, logger, current_timestamp, Exception("Agency Code not found"))
             return
         
         logger.log(
@@ -216,7 +235,6 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
         dems_api_url = parameters[f'/{env_stage}/isl_endpoint_url'] + parameters[f'/{env_stage}/isl_endpoint/case_id_method']
         bearer_token = parameters[f'/{env_stage}/isl_endpoint_secret']
         agency_codes_to_try = [agency_id_code] + (sub_agencies if sub_agency_yn == 'Y' else [])
-        
         found_dems_case = False
         for code in agency_codes_to_try:
             status, dems_case_id = call_dems_api(http, dems_api_url, bearer_token, code, agency_file_number, logger, job_id)
@@ -235,6 +253,14 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
         if found_dems_case:
             current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
             send_sqs_message(sqs_client, 'q-case-detail.fifo', job_id, case_title, logger, current_timestamp)
+            
+             # If processing succeeds, delete the message
+            queue_url = sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
+            sqs_client.delete_message(
+            QueueUrl=queue_url,
+            ReceiptHandle=message['ReceiptHandle']
+        )
+        logger.info(f"Deleted message: {message['MessageId']}")
         
         if not found_dems_case:
             logger.log(
@@ -244,6 +270,7 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
                 job_id=job_id,
                 additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
             )
+            send_sqs_message(sqs_client, 'q-transfer-exception', job_id, case_title, logger, current_timestamp, Exception("Case not found"))
             
     except Exception as msg_err:
         logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=job_id)
