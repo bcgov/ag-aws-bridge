@@ -90,6 +90,13 @@ Resources:
       Architectures:
         - x86_64
       Timeout: 300
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-evidence-download.fifo
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
       Layers:
         - !Ref LambdaStructuredLoggerLayer
       Environment:
