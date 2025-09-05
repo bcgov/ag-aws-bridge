@@ -12,7 +12,7 @@ from bridge_tracking_db_layer import (
     get_evidence_file, create_evidence_file, update_job_counts,
     get_status_code_by_value,get_db_manager,
     get_evidence_transfer_job, update_job_status, StatusCodes,
-    execute_transaction
+    
 )
 
 class StatusCodes(Enum):
@@ -45,7 +45,7 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
         
         # Get environment stage from environment variable
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-        logger.info(f"Loading configuration for environment: {env_stage}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Loading configuration for environment: {env_stage}")
         
         # Define SSM parameter paths based on environment
         parameter_paths = {
@@ -80,12 +80,12 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
                     break
         
         _lambda_config = config
-        logger.info(f"Lambda configuration loaded from SSM for environment: {env_stage}")
+        logger.log_success( event=Constants.PROCESS_NAME,message=f"Lambda configuration loaded from SSM for environment: {env_stage}")
         
         return _lambda_config
         
     except Exception as e:
-        logger.error(f"Failed to retrieve Lambda configuration from SSM: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
         raise
 
 # def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
@@ -285,10 +285,10 @@ def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: s
             MessageDeduplicationId=f"{job_id}-{evidence_id}-{hash(error_message)}" if evidence_id else f"{job_id}-general-{hash(error_message)}"
         )
         
-        logger.info(f"Sent exception message to queue for job {job_id}, evidence {evidence_id}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent exception message to queue for job {job_id}, evidence {evidence_id}")
         
     except Exception as e:
-        logger.error(f"Failed to send exception message: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
 
 def create_sqs_message(job_id: str, evidence_id: str, source_case_id: str, evidence_details: Dict) -> Dict:
     """Create a properly formatted SQS message for evidence download."""
@@ -328,9 +328,9 @@ def create_evidence_files_atomic(files_to_create: List[Dict], job_id: str, proce
             except Exception as e:
                 # Handle unique constraint violation (race condition)
                 if "duplicate key" in str(e).lower() or "unique constraint" in str(e).lower():
-                    logger.warning(f"Evidence file {file_data['evidence_id']} already created by another process")
+                    print(f"Evidence file {file_data['evidence_id']} already created by another process")
                 else:
-                    logger.error(f"Failed to create evidence file {file_data['evidence_id']}: {e}")
+                    logger.log_error(event=Constants.PROCESS_NAME, error=e)
                     raise  # Re-raise non-duplicate errors
         
         if successful_files:
@@ -349,12 +349,12 @@ def create_evidence_files_atomic(files_to_create: List[Dict], job_id: str, proce
                 last_modified_process=process_name
             )
             
-            logger.info(f"Successfully created {len(successful_files)} evidence files ({normal_count} normal, {oversize_count} oversize)")
+            logger.log_success( event=Constants.PROCESS_NAME, message=f"Successfully created {len(successful_files)} evidence files ({normal_count} normal, {oversize_count} oversize)")
         
         return True
         
     except Exception as e:
-        logger.error(f"Database transaction failed: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
         return False
 
 def send_batch_sqs_messages(normal_messages: List[Dict], oversize_messages: List[Dict], 
@@ -379,7 +379,7 @@ def send_batch_sqs_messages(normal_messages: List[Dict], oversize_messages: List
     total_sent = results['normal_queue']['sent'] + results['oversize_queue']['sent']
     total_failed = results['normal_queue']['failed'] + results['oversize_queue']['failed']
     
-    logger.info(f"SQS batch results: {total_sent} sent, {total_failed} failed")
+    logger.log_success( event=Constants.PROCESS_NAME, message=f"SQS batch results: {total_sent} sent, {total_failed} failed")
     
     return results
 
@@ -410,16 +410,17 @@ def send_messages_to_queue(sqs_client, queue_url: str, messages: List[Dict], que
             for failure in failed:
                 error_msg = f"Message {failure['Id']} failed: {failure['Message']} (Code: {failure['Code']})"
                 errors.append(error_msg)
-                logger.error(error_msg)
+                logger.log_error(event=Constants.PROCESS_NAME, error=Exception(error_msg))
+                
             
             if successful:
-                logger.info(f"Successfully sent {len(successful)} messages to {queue_type} queue")
+                logger.log_success(event=Constants.PROCESS_NAME, message=f"Successfully sent {len(successful)} messages to {queue_type} queue")
                 
         except Exception as e:
             error_msg = f"Failed to send batch to {queue_type} queue: {str(e)}"
             errors.append(error_msg)
             failed_count += len(batch)
-            logger.error(error_msg)
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception(error_msg))
     
     return {
         'sent': sent_count,
@@ -471,8 +472,8 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
         #     'agency_id': config['axon_agency_id'],
         #     'case_id': source_case_id
         # }
-        
-        logger.info(f"Calling Axon API: {api_url} for case {source_case_id}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
+      
         start_time = time.perf_counter()
     
         response_time = time.perf_counter() - start_time
@@ -512,7 +513,8 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
                 "source_case_evidence_count_downloaded": 0
             }
             }
-            logger.error(json.dumps(log_data))
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception(json.dumps(log_data)))
+            
 
             update_job_status(
                 job_id=job_id,
@@ -524,10 +526,12 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
         return evidence_list
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to get case evidence from API: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
+        
         raise Exception(f"Axon API error: {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected error calling case evidence API: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
+        
         raise
 
 
@@ -564,7 +568,7 @@ def persist_and_queue(
 
     try:
         if not files_to_create:
-            logger.info(
+            logger.log_success( event=Constants.PROCESS_NAME, message=
                 json.dumps({
                     'message': 'No new evidence files to process',
                     'job_id': job_id,
@@ -610,15 +614,15 @@ def persist_and_queue(
             last_modified_process=PROCESS_NAME
         )
 
-        logger.info(
-            json.dumps({
+        logger.log_success( event=Constants.PROCESS_NAME,message= json.dumps({
                 'message': 'Evidence processing completed successfully',
                 'job_id': job_id,
                 'source_case_id': source_case_id,
                 'files_processed': len(files_to_create),
                 'normal_files': len(normal_sqs_messages),
                 'oversize_files': len(oversize_sqs_messages)
-            })
+            }), job_id=job_id
+           
         )
 
         return {
@@ -636,13 +640,7 @@ def persist_and_queue(
         }
 
     except botocore.exceptions.ClientError as e:
-        logger.error(
-            json.dumps({
-                'message': 'AWS service error during persistence or queuing',
-                'job_id': job_id,
-                'error': str(e)
-            })
-        )
+        logger.log_error(event=Constants.PROCESS_NAME,error=e )
         send_exception_message(
             exception_queue_url, job_id, None, source_case_id, f"AWS service error: {str(e)}"
         )
@@ -651,13 +649,7 @@ def persist_and_queue(
             'body': json.dumps({'error': f'AWS service error: {str(e)}'})
         }
     except Exception as e:
-        logger.error(
-            json.dumps({
-                'message': 'Failed to persist or queue evidence files',
-                'job_id': job_id,
-                'error': str(e)
-            })
-        )
+        logger.log_error(event=Constants.PROCESS_NAME,error=e )
         send_exception_message(
             exception_queue_url, job_id, None, source_case_id, f"Processing error: {str(e)}"
         )
@@ -667,7 +659,7 @@ def persist_and_queue(
         }
 def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
     config = get_lambda_config()
-    evidence_list = retrieve_case_evidence(source_case_id, config)
+    evidence_list = retrieve_case_evidence(source_case_id, job_id, config)
     files_to_create, normal_sqs_messages, oversize_sqs_messages = process_evidence_records(
         evidence_list, job_id, source_case_id, config
     )
@@ -678,12 +670,11 @@ def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
 def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, str]) -> List[Dict]:
     """Fetch evidence list from Axon API."""
     evidence_list = get_case_evidence_from_api(source_case_id, job_id, config)
-    logger.info(
-        json.dumps({
+    logger.log_success(event=Constants.PROCESS_NAME, message=json.dumps({
             'message': 'Retrieved evidence list',
             'source_case_id': source_case_id,
             'evidence_count': len(evidence_list)
-        })
+        }), job_id=job_id
     )
     return evidence_list
 
@@ -761,7 +752,7 @@ def handle_error_and_queue(
             'error': str(exception),
             'context': context
         }
-        logger.error(json.dumps(log_data))
+        logger.log_error(event=Constants.PROCESS_NAME,error=Exception(json.dumps(log_data)))
 
         # Send the error to the exception queue
         send_exception_message(
@@ -774,14 +765,14 @@ def handle_error_and_queue(
 
     except Exception as queue_error:
         # Log failure to send to exception queue, but don't raise to avoid masking original error
-        logger.error(
+        logger.log_error( event=Constants.PROCESS_NAME, error=Exception(
             json.dumps({
                 'message': f"Failed to send exception message to queue",
                 'job_id': job_id,
                 'original_error': str(exception),
                 'queue_error': str(queue_error),
                 'context': context
-            })
+            }))
         )
 
     # Re-raise the original exception to maintain error flow
@@ -807,22 +798,22 @@ def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> D
             'evidence_id': evidence_id
         }
         
-        logger.info(f"Calling Axon Evidence Details API for evidence {evidence_id}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
         
         response = requests.get(api_url, headers=headers, params=params, timeout=30,verify=True)
         response.raise_for_status()
         
         evidence_details = response.json()
         
-        logger.info(f"Retrieved evidence details for {evidence_id}")
+        logger.log_success(event=Constants.PROCESS_NAME,message=f"Retrieved evidence details for {evidence_id}")
         
         return evidence_details
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to get evidence details from API: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME,error= e)
         raise Exception(f"Axon Evidence Details API error: {str(e)}")
     except Exception as e:
-        logger.error(f"Unexpected error calling evidence details API: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
         raise
 
 # Lambda handler
@@ -849,7 +840,7 @@ def lambda_handler(event, context):
         
         # Log environment information
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-        logger.info(f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
         
         # Process the case evidence
         #return process_case_evidence_with_sqs(job_id, source_case_id)
@@ -869,7 +860,8 @@ def lambda_handler(event, context):
             job_id=context.aws_request_id
          )
     except Exception as e:
-        logger.error(f"Lambda handler error: {e}")
+        logger.log_error(event=Constants.PROCESS_NAME,error=Exception("'job_id and source_case_id are required"),job_id=context.aws_request_id)
+        
         return {
             'statusCode': 500,
             'body': json.dumps({'error': f'Lambda execution failed: {str(e)}'})
