@@ -1,0 +1,20 @@
+{
+  "Records": [
+    {
+      "messageId": "test-message-123",
+      "receiptHandle": "test-receipt-handle",
+      "body": "{\"evidence_id\": \"12345\", \"evidence_file_id\": \"67890\", \"job_id\": \"job-abc123\"}",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1693123456789",
+        "SenderId": "AIDAIENQZJOLO23YVJ4VO",
+        "ApproximateFirstReceiveTimestamp": "1693123456789"
+      },
+      "messageAttributes": {},
+      "md5OfBody": "test-md5-hash",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:us-east-1:123456789012:file-download-queue",
+      "awsRegion": "us-east-1"
+    }
+  ]
+}

@@ -81,6 +81,23 @@ Resources:
   #       - Key: Purpose
   #         Value: "Token refresh failure handling"
 
+  AxonEvidenceDownloaderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/lambdas/axon-evidence-downloader/app
+      Handler: app.lambda_handler
+      Runtime: python3.13
+      Architectures:
+        - x86_64
+      Timeout: 300
+      Layers:
+        - !Ref LambdaStructuredLoggerLayer
+      Environment:
+        Variables:
+          ENV_STAGE: !Ref Environment
+      Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-downloader-role"
+
+
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
     Properties:
@@ -110,6 +127,30 @@ Outputs:
     Value: !GetAtt AxonAuthenticatorFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-AxonAuthenticatorFunction"
+
+  AxonEvidenceDownloaderFunction:
+    Description: File Downloader Lambda Function ARN
+    Value: !GetAtt AxonEvidenceDownloaderFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AxonEvidenceDownloaderFunction"
+  
+  FileDownloadQueue:
+    Description: SQS Queue URL for file downloads
+    Value: !Ref FileDownloadQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-FileDownloadQueue"
+    
+  FileDownloadQueueArn:
+    Description: SQS Queue ARN for file downloads  
+    Value: !GetAtt FileDownloadQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FileDownloadQueueArn"
+    
+  S3DownloadBucket:
+    Description: S3 Bucket for downloaded files
+    Value: !Ref S3DownloadBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3DownloadBucket"
 
   ScheduleExpression:
     Description: Schedule expression for token refresh
