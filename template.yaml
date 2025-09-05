@@ -133,24 +133,6 @@ Outputs:
     Value: !GetAtt AxonEvidenceDownloaderFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-AxonEvidenceDownloaderFunction"
-  
-  FileDownloadQueue:
-    Description: SQS Queue URL for file downloads
-    Value: !Ref FileDownloadQueue
-    Export:
-      Name: !Sub "${AWS::StackName}-FileDownloadQueue"
-    
-  FileDownloadQueueArn:
-    Description: SQS Queue ARN for file downloads  
-    Value: !GetAtt FileDownloadQueue.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-FileDownloadQueueArn"
-    
-  S3DownloadBucket:
-    Description: S3 Bucket for downloaded files
-    Value: !Ref S3DownloadBucket
-    Export:
-      Name: !Sub "${AWS::StackName}-S3DownloadBucket"
 
   ScheduleExpression:
     Description: Schedule expression for token refresh
