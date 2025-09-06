@@ -38,6 +38,17 @@ Resources:
         - python3.13
       RetentionPolicy: Retain
 
+  # DB layer
+  BridgeTrackingDbLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: bridge-tracking-db-layer
+      ContentUri: src/layers/bridge_tracking_db_layer/
+      CompatibleRuntimes:
+        - python3.11
+        # - python3.13
+      RetentionPolicy: Retain
+
   AxonAuthenticatorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -86,7 +97,7 @@ Resources:
     Properties:
       CodeUri: src/lambdas/axon-evidence-downloader/app
       Handler: app.lambda_handler
-      Runtime: python3.13
+      Runtime: python3.11
       Architectures:
         - x86_64
       Timeout: 300
@@ -99,6 +110,7 @@ Resources:
             MaximumBatchingWindowInSeconds: 0
       Layers:
         - !Ref LambdaStructuredLoggerLayer
+        - !Ref BridgeTrackingDbLayer
       Environment:
         Variables:
           ENV_STAGE: !Ref Environment
