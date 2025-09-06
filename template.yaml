@@ -115,7 +115,12 @@ Resources:
         Variables:
           ENV_STAGE: !Ref Environment
       Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-downloader-role"
-
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-02e66eded7e19152a
+        SubnetIds:
+          - subnet-051bab173f8636f38
+          - subnet-0642fef5bef5ee9a6
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
