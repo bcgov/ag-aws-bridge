@@ -121,6 +121,12 @@ Resources:
         SubnetIds:
           - subnet-051bab173f8636f38
           - subnet-0642fef5bef5ee9a6
+          - subnet-0e84012379d304b04
+          - subnet-065692d73bf59eaff
+          - subnet-072de875489645b47
+          - subnet-07c4410a94c04d471
+          - subnet-07b9f9fbd02e43ccc
+          - subnet-0197920eff5787cf4
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
