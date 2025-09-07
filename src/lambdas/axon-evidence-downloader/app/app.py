@@ -82,8 +82,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         sample_files = db_manager.get_sample_evidence_files(5)
         logger.info("Sample evidence files:")
         for file_record in sample_files:
-            logger.info(f"  ID: {file_record['evidence_id']}, Job: {file_record['job_id']}, FileID: {file_record['evidence_file_id']}")
-        
+            logger.log(
+                event=event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
+                message="axon_evidence_downloader",
+                context_data={
+                    "env_stage": env_stage,
+                    "file_record": f"  ID: {file_record['evidence_id']}, Job: {file_record['job_id']}, FileID: {file_record['evidence_file_id']}",
+                },
+            )
 
         # evidence_id = message_body.get('evidence_id')
         # db_manager = get_db_manager(env_param_in=env_stage)
