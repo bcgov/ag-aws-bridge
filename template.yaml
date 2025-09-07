@@ -118,7 +118,7 @@ Resources:
       VpcConfig:
         SecurityGroupIds:
           - sg-02e66eded7e19152a
-        SubnetIds:
+        SubnetIds:  # todo: use only the subnets needed
           - subnet-051bab173f8636f38
           - subnet-0642fef5bef5ee9a6
           - subnet-0e84012379d304b04

@@ -484,6 +484,15 @@ class DatabaseManager:
         return self.execute_query_one(query, (is_imported, dems_imported_id, error_msg, 
                                             last_modified_process, evidence_id))
     
+    def get_sample_evidence_files(self, limit: int = 5) -> List[Dict]:
+        """Get sample evidence files for testing."""
+        query = """
+            SELECT evidence_id, job_id, evidence_file_id
+            FROM evidence_files 
+            LIMIT %s
+        """
+        return self.execute_query(query, (limit,))
+
     def get_evidence_file(self, evidence_id: str) -> Optional[Dict]:
         """Get an evidence file by ID."""
         query = "SELECT * FROM evidence_files WHERE evidence_id = %s"

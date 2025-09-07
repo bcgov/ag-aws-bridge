@@ -78,20 +78,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Retrieve SSM parameters
         ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
-
-        evidence_id = message_body.get('evidence_id')
         db_manager = get_db_manager(env_param_in=env_stage)
-        evidence_file = db_manager.get_evidence_file(evidence_id)
-        logger.log(
-            event=event,
-            level=LogLevel.INFO,
-            status=LogStatus.SUCCESS,
-            message="axon_evidence_downloader_file",
-            context_data={
-                "env_stage": env_stage,
-                "file": f'Count: {list(evidence_file.keys()).count}',
-            },
-        )
+        sample_files = db_manager.get_sample_evidence_files(5)
+        logger.info("Sample evidence files:")
+        for file_record in sample_files:
+            logger.info(f"  ID: {file_record['evidence_id']}, Job: {file_record['job_id']}, FileID: {file_record['evidence_file_id']}")
+        
+
+        # evidence_id = message_body.get('evidence_id')
+        # db_manager = get_db_manager(env_param_in=env_stage)
+        # evidence_file = db_manager.get_evidence_file(evidence_id)
+        # logger.log(
+        #     event=event,
+        #     level=LogLevel.INFO,
+        #     status=LogStatus.SUCCESS,
+        #     message="axon_evidence_downloader_file",
+        #     context_data={
+        #         "env_stage": env_stage,
+        #         "file": f'Count: {list(evidence_file.keys()).count}',
+        #     },
+        # )
+
         # # Get access token from third-party API
         # access_token, token_data = get_access_token(ssm_parameters, logger, event, base_context)
 
