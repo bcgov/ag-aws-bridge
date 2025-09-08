@@ -74,9 +74,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "message": f'Message content: {message_body}',
             },
         )
-        
-        # Retrieve SSM parameters
-        ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
         db_manager = get_db_manager(env_param_in=env_stage)
         sample_files = db_manager.get_sample_evidence_files(5)
@@ -92,6 +89,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "file_record": f"  ID: {file_record['evidence_id']}, Job: {file_record['job_id']}, FileID: {file_record['evidence_file_id']}",
                 },
             )
+        
+        # Retrieve SSM parameters
+        ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
         # evidence_id = message_body.get('evidence_id')
         # db_manager = get_db_manager(env_param_in=env_stage)
