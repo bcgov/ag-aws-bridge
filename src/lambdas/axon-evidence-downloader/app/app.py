@@ -77,7 +77,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         db_manager = get_db_manager(env_param_in=env_stage)
         sample_files = db_manager.get_sample_evidence_files(5)
-        logger.info("Sample evidence files:")
         for file_record in sample_files:
             logger.log(
                 event=event,
