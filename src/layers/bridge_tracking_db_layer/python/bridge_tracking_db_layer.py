@@ -122,18 +122,19 @@ class DatabaseManager:
             if connection:
                 self.connection_pool.putconn(connection)
     
-    def execute_query(self, query: str, params: tuple = None) -> List[Dict]:
+    def execute_query(self, query: str, params: tuple = None, autoCommit: bool=False) -> List[Dict]:
         """Execute a query and return results as list of dictionaries."""
         with self.get_connection() as conn:
+            conn.autocommit = autoCommit
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, params)
                 if cursor.description:
                     return [dict(row) for row in cursor.fetchall()]
                 return []
     
-    def execute_query_one(self, query: str, params: tuple = None) -> Optional[Dict]:
+    def execute_query_one(self, query: str, params: tuple = None, autoCommit: bool = False) -> Optional[Dict]:
         """Execute a query and return first result as dictionary."""
-        results = self.execute_query(query, params)
+        results = self.execute_query(query, params, autoCommit)
         return results[0] if results else None
     
     def execute_transaction(self, queries: List[Tuple[str, tuple]]) -> List[Dict]:
@@ -310,25 +311,24 @@ class DatabaseManager:
                         'updated_count': 0
                     }
 
-    # Evidence Transfer Jobs methods
     def create_evidence_transfer_job(self, job_data: Dict[str, Any]) -> Dict:
         """Create a new evidence transfer job."""
         query = """
-            INSERT INTO evidence_transfer_jobs (
-                job_id, job_created_utc, job_status_code, job_msg, source_system, source_agency,
-                source_case_id, source_case_title, source_case_last_modified_utc,
-                source_case_evidence_count_total, source_case_evidence_count_to_download,
-                source_case_evidence_count_downloaded, dems_case_id, last_modified_process,
-                last_modified_utc, retry_count, max_retries
-            ) VALUES (
-                %(job_id)s, NOW(), %(job_status_code)s, %(job_msg)s, %(source_system)s, %(source_agency)s,
-                %(source_case_id)s, %(source_case_title)s, %(source_case_last_modified_utc)s,
-                %(source_case_evidence_count_total)s, %(source_case_evidence_count_to_download)s,
-                %(source_case_evidence_count_downloaded)s, %(dems_case_id)s, %(last_modified_process)s,
-                NOW(), %(retry_count)s, %(max_retries)s
-            ) RETURNING *
+        INSERT INTO evidence_transfer_jobs (
+            job_id, job_created_utc, job_status_code, job_msg, source_system, source_agency,
+            source_case_id, source_case_title, source_case_last_modified_utc,
+            source_case_evidence_count_total, source_case_evidence_count_to_download,
+            source_case_evidence_count_downloaded, dems_case_id, last_modified_process,
+            last_modified_utc, retry_count, max_retries
+        ) VALUES (
+            %(job_id)s, NOW(), %(job_status_code)s, %(job_msg)s, %(source_system)s, %(source_agency)s,
+            %(source_case_id)s, %(source_case_title)s, %(source_case_last_modified_utc)s,
+            %(source_case_evidence_count_total)s, %(source_case_evidence_count_to_download)s,
+            %(source_case_evidence_count_downloaded)s, %(dems_case_id)s, %(last_modified_process)s,
+            NOW(), %(retry_count)s, %(max_retries)s
+        ) RETURNING *
         """
-        
+    
         # Set defaults
         job_data.setdefault('job_msg', None)
         job_data.setdefault('source_case_evidence_count_to_download', 0)
@@ -336,9 +336,9 @@ class DatabaseManager:
         job_data.setdefault('dems_case_id', None)
         job_data.setdefault('retry_count', 0)
         job_data.setdefault('max_retries', 3)
-        
-        return self.execute_query_one(query, job_data)
     
+        return self.execute_query_one(query, job_data, True)
+        
     def get_evidence_transfer_job(self, job_id: str) -> Optional[Dict]:
         """Get an evidence transfer job by ID."""
         query = "SELECT * FROM evidence_transfer_jobs WHERE job_id = %s"
@@ -353,7 +353,7 @@ class DatabaseManager:
             WHERE job_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (status_code, job_msg, last_modified_process, job_id))
+        return self.execute_query_one(query, (status_code, job_msg, last_modified_process, job_id), True)
     
     def update_job_counts(self, job_id: str, total: int = None, to_download: int = None, 
                          downloaded: int = None, last_modified_process: str = None) -> Dict:
@@ -392,7 +392,7 @@ class DatabaseManager:
             WHERE job_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (last_modified_process, job_id))
+        return self.execute_query_one(query, (last_modified_process, job_id), True)
     
     def get_jobs_by_status(self, status_code: int, limit: int = 100) -> List[Dict]:
         """Get jobs by status code."""
@@ -412,7 +412,7 @@ class DatabaseManager:
             WHERE job_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (dems_case_id, last_modified_process, job_id))
+        return self.execute_query_one(query, (dems_case_id, last_modified_process, job_id), True)
 
     # Evidence Files methods
     def create_evidence_file(self, file_data: Dict[str, Any]) -> Dict:
@@ -431,7 +431,7 @@ class DatabaseManager:
         """
         
         file_data.setdefault('retry_count', 0)
-        return self.execute_query_one(query, file_data)
+        return self.execute_query_one(query, file_data, True)
     
     def update_evidence_file_state(self, evidence_id: str, state_code: int, 
                                   last_modified_process: str) -> Dict:
@@ -442,7 +442,7 @@ class DatabaseManager:
             WHERE evidence_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (state_code, last_modified_process, evidence_id))
+        return self.execute_query_one(query, (state_code, last_modified_process, evidence_id), True)
     
     def mark_file_downloaded(self, evidence_id: str, error_msg: str = None, 
                            last_modified_process: str = None) -> Dict:
@@ -455,7 +455,7 @@ class DatabaseManager:
             WHERE evidence_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (is_downloaded, error_msg, last_modified_process, evidence_id))
+        return self.execute_query_one(query, (is_downloaded, error_msg, last_modified_process, evidence_id), True)
     
     def mark_file_transferred(self, evidence_id: str, error_msg: str = None, 
                             last_modified_process: str = None) -> Dict:
@@ -482,7 +482,7 @@ class DatabaseManager:
             RETURNING *
         """
         return self.execute_query_one(query, (is_imported, dems_imported_id, error_msg, 
-                                            last_modified_process, evidence_id))
+                                            last_modified_process, evidence_id), True)
     
     def get_evidence_file(self, evidence_id: str) -> Optional[Dict]:
         """Get an evidence file by ID."""
@@ -512,7 +512,7 @@ class DatabaseManager:
             WHERE evidence_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (last_modified_process, evidence_id))
+        return self.execute_query_one(query, (last_modified_process, evidence_id), True)
 
     # Status Codes methods
     def get_status_code(self, identifier: int) -> Optional[Dict]:
