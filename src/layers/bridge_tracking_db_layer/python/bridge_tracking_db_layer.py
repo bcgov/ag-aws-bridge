@@ -484,6 +484,7 @@ class DatabaseManager:
         return self.execute_query_one(query, (is_imported, dems_imported_id, error_msg, 
                                             last_modified_process, evidence_id))
     
+    # this is just a testing method, safe to remove after release
     def get_sample_evidence_files(self, limit: int = 5) -> List[Dict]:
         """Get sample evidence files for testing."""
         query = """
@@ -607,7 +608,34 @@ class DatabaseManager:
             LIMIT %s
         """
         return self.execute_query(query, (limit,))
-
+    
+    def get_source_agency_for_evidence(self, evidence_id: str, job_id: str) -> str | None:
+        """
+        Get source_agency (guid value) for a specific evidence and job 
+        when evidence_transfer_state_code is 30 (DOWNLOAD-READY).
+        
+        Args:
+            evidence_id: The evidence ID to look up
+            job_id: The job ID to look up
+            
+        Returns:
+            str | None: The source_agency GUID value, or None if not found or state is not 30
+        """
+        query = """
+            SELECT j.source_agency 
+            FROM evidence_files ef
+            JOIN evidence_transfer_jobs j ON ef.job_id = j.job_id
+            WHERE ef.evidence_id = %s 
+            AND ef.job_id = %s
+            AND ef.evidence_transfer_state_code = 30
+        """
+        
+        result = self.execute_query(query, (evidence_id, job_id))
+        
+        if result and len(result) > 0:
+            return result[0]['source_agency']
+        return None
+    
     # Utility methods
     def health_check(self) -> Dict[str, Any]:
         """Check database health."""

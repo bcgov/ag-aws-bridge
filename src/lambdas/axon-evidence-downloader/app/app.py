@@ -55,7 +55,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             event=event,
             level=LogLevel.INFO,
             status=LogStatus.SUCCESS,
-            message="axon_evidence_downloader",
+            message="axon_evidence_downloader_massage_id",
             context_data={
                 "env_stage": env_stage,
                 "message": f'Processing message {message_id}',
@@ -68,61 +68,30 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             event=event,
             level=LogLevel.INFO,
             status=LogStatus.SUCCESS,
-            message="axon_evidence_downloader",
+            message="axon_evidence_downloader_message_body",
             context_data={
                 "env_stage": env_stage,
                 "message": f'Message content: {message_body}',
             },
         )
 
-        db_manager = get_db_manager(env_param_in=env_stage)
-        sample_files = db_manager.get_sample_evidence_files(5)
-        for file_record in sample_files:
-            logger.log(
-                event=event,
-                level=LogLevel.INFO,
-                status=LogStatus.SUCCESS,
-                message="axon_evidence_downloader",
-                context_data={
-                    "env_stage": env_stage,
-                    "file_record": f"  ID: {file_record['evidence_id']}, Job: {file_record['job_id']}, FileID: {file_record['evidence_file_id']}",
-                },
-            )
-        
         # Retrieve SSM parameters
         ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
-        # evidence_id = message_body.get('evidence_id')
-        # db_manager = get_db_manager(env_param_in=env_stage)
-        # evidence_file = db_manager.get_evidence_file(evidence_id)
-        # logger.log(
-        #     event=event,
-        #     level=LogLevel.INFO,
-        #     status=LogStatus.SUCCESS,
-        #     message="axon_evidence_downloader_file",
-        #     context_data={
-        #         "env_stage": env_stage,
-        #         "file": f'Count: {list(evidence_file.keys()).count}',
-        #     },
-        # )
-
-        # # Get access token from third-party API
-        # access_token, token_data = get_access_token(ssm_parameters, logger, event, base_context)
-
-        # # Store the access token in SSM Parameter Store
-        # store_access_token(env_stage, access_token, token_data, logger, event, base_context)
-
-        # # Log successful completion
-        # logger.log(
-        #     event=event,
-        #     level=LogLevel.INFO,
-        #     status=LogStatus.SUCCESS,
-        #     message="lambda_execution_complete",
-        #     context_data={
-        #         **base_context,
-        #         "operation": "lambda_execution_success",
-        #     },
-        # )
+        evidence_id = message_body.get('evidence_id')
+        job_id = message_body.get('job_id')
+        db_manager = get_db_manager(env_param_in=env_stage)
+        source_agency = db_manager.get_source_agency_for_evidence(evidence_id, job_id)
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="axon_evidence_downloader_source_agency",
+            context_data={
+                "env_stage": env_stage,
+                "source_agency": f'{source_agency}',
+            },
+        )
 
         logger.log(
             event=event,
@@ -179,6 +148,7 @@ def get_ssm_parameters(env_stage, logger: LambdaStructuredLogger, event, context
     # Define parameter paths
     parameter_paths = {
         "bearer": f"/{env_stage}/axon/api/bearer",
+        "base_url": f"/{env_stage}/axon/api/base_url",
     }
 
     parameters = {}
