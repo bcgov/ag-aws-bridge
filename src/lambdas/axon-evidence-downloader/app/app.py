@@ -1,22 +1,25 @@
+import hashlib
 import json
 import os
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any
 import boto3
 from botocore.exceptions import ClientError
+import urllib3
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from bridge_tracking_db_layer import get_db_manager, StatusCodes
 
 # Initialize boto3 client outside handler for reuse
 ssm_client = boto3.client("ssm")
 
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """AXON Evidence Downloader Lambda function for processing a single SQS message to download a file.
-    
+
     Args:
         event: SQS event containing single message
         context: Lambda context object
-        
+
     Returns:
         Dict with processing results
 
@@ -48,22 +51,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Log the start of the function
         logger.log_start(event="axon_evidence_downloader", job_id=request_id)
 
-        records = event.get('Records', [])
+        records = event.get("Records", [])
         record = records[0]
-        message_id = record.get('messageId')
+        message_id = record.get("messageId")
         logger.log(
             event=event,
             level=LogLevel.INFO,
             status=LogStatus.SUCCESS,
-            message="axon_evidence_downloader_massage_id",
+            message="axon_evidence_downloader_message_id",
             context_data={
                 "env_stage": env_stage,
-                "message": f'Processing message {message_id}',
+                "message_id": f"Processing message id {message_id}",
             },
         )
-        
+
         # Parse the message body
-        message_body = json.loads(record.get('body', '{}'))
+        message_body = json.loads(record.get("body", "{}"))
         logger.log(
             event=event,
             level=LogLevel.INFO,
@@ -71,15 +74,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             message="axon_evidence_downloader_message_body",
             context_data={
                 "env_stage": env_stage,
-                "message": f'Message content: {message_body}',
+                "message_body": f"Message content: {message_body}",
             },
         )
 
         # Retrieve SSM parameters
         ssm_parameters = get_ssm_parameters(env_stage, logger, event, base_context)
 
-        evidence_id = message_body.get('evidence_id')
-        job_id = message_body.get('job_id')
+        evidence_id = message_body.get("evidence_id")
+        job_id = message_body.get("job_id")
+        evidence_file_id = message_body.get("evidence_file_id")
+
+        # Retrieve agency
         db_manager = get_db_manager(env_param_in=env_stage)
         source_agency = db_manager.get_source_agency_for_evidence(evidence_id, job_id)
         logger.log(
@@ -89,9 +95,35 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             message="axon_evidence_downloader_source_agency",
             context_data={
                 "env_stage": env_stage,
-                "source_agency": f'{source_agency}',
+                "source_agency": f"{source_agency}",
             },
         )
+
+        # Construct url
+        base_url = ssm_parameters['base_url']
+        evidence_file_url = construct_evidence_file_url(
+            base_url, source_agency, evidence_id, evidence_file_id
+        )
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="axon_evidence_downloader_evidence_file_url",
+            context_data={
+                "env_stage": env_stage,
+                "evidence_file_url": f"{evidence_file_url}",
+            },
+        )
+
+        # Download file to /tmp
+        bearer_token = ssm_parameters["bearer"]
+        file_path = download_evidence_file(
+            evidence_file_url, evidence_file_id, bearer_token
+        )
+
+        # Calculate checksum
+        file_checksum = calculate_file_checksum(file_path)
+
 
         logger.log(
             event=event,
@@ -100,14 +132,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             message="axon_evidence_downloader",
             context_data={
                 "env_stage": env_stage,
-                "message": f'Successfully processed message {message_id}',
+                "message": f"Successfully processed message {message_id}",
             },
         )
 
         return {
-                'statusCode': 200,
-                'message': f'Successfully processed message {message_id}'
-            }
+            "statusCode": 200,
+            "message": f"Successfully processed message {message_id}",
+        }
 
     except Exception as e:
         logger.log(
@@ -117,19 +149,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             message="axon_evidence_downloader",
             context_data={
                 "env_stage": env_stage,
-                "error_message": f'Failed to process message {message_id}',
+                "error_message": f"Failed to process message {message_id}",
                 "error": str(e),
                 "error_type": type(e).__name__,
             },
         )
 
-        return {
-            'statusCode': 500,
-            'error': f'Failed to process message {message_id}'
-        }
-    
+        return {"statusCode": 500, "error": f"Failed to process message {message_id}"}
 
-def get_ssm_parameters(env_stage, logger: LambdaStructuredLogger, event, context_data=None):
+
+def get_ssm_parameters(
+    env_stage, logger: LambdaStructuredLogger, event, context_data=None
+):
     """
     Retrieve required SSM parameters for the given environment stage.
 
@@ -208,7 +239,7 @@ def get_ssm_parameters(env_stage, logger: LambdaStructuredLogger, event, context
             parameters_collected=parameters,
             response_time_ms=response_time_ms,
             invalid_parameters=failed_parameters if failed_parameters else None,
-            **context_data
+            **context_data,
         )
 
         return parameters
@@ -254,3 +285,109 @@ def get_ssm_parameters(env_stage, logger: LambdaStructuredLogger, event, context
         )
 
         raise
+
+def construct_evidence_file_url(
+    base_url: str, source_agency: str, evidence_id: str, evidence_file_id: str
+) -> str:
+    """
+    Construct the full URL for accessing an evidence file.
+
+    Args:
+        base_url: axon base url
+        source_agency: The source agency GUID
+        evidence_id: The evidence ID GUID
+        evidence_file_id: The evidence file ID GUID
+
+    Returns:
+        str: The constructed URL
+    """
+    base_url = base_url.rstrip('/')
+    url = f"{base_url}/api/v1/agencies/{source_agency}/evidence/{evidence_id}/files/{evidence_file_id}"
+
+    return url
+
+def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -> str:
+    """
+    Download an evidence file to Lambda's /tmp directory.
+
+    Args:
+        url: The complete URL to download the file from
+        evidence_file_id: The evidence file ID (used for filename)
+        bearer_token: bearer token
+
+    Returns:
+        str: The full path to the downloaded file
+
+    Raises:
+        Exception: If file writing fails
+    """
+    # Set up headers
+    headers = {"Authorization": f"Bearer {bearer_token}", "Accept": "*/*"}
+
+    # Create filename and full path
+    filename = f"{evidence_file_id}"
+    file_path = f"/tmp/{filename}"
+
+    http = urllib3.PoolManager()
+
+    try:
+        # Make the request
+        response = http.request("GET", url, headers=headers, timeout=300)
+
+        if response.status != 200:
+            raise Exception(f"HTTP {response.status}: {response.reason}")
+
+        # Write the file to /tmp
+        with open(file_path, "wb") as f:
+            f.write(response.data)
+
+        # Verify file was written
+        if not os.path.exists(file_path):
+            raise Exception(f"File was not created at {file_path}")
+
+        file_size = os.path.getsize(file_path)
+        print(f"Successfully downloaded file: {file_path} ({file_size} bytes)")
+
+        return file_path
+
+    except Exception as e:
+        print(f"Failed to download file from {url}: {str(e)}")
+        # Clean up partial file if it exists
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
+
+def calculate_file_checksum(file_path: str) -> str:
+    """
+    Calculate checksum of a file.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        str: Hexadecimal checksum string
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        ValueError: If algorithm is not supported
+    """
+    # Create hash object
+    hash_obj = hashlib.new('sha256')
+    
+    try:
+        # Read file in chunks to handle large files efficiently
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                hash_obj.update(chunk)
+        
+        checksum = hash_obj.hexdigest()
+        print(f"Calculated sha256 checksum for {file_path}: {checksum}")
+        return checksum
+        
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        raise
+    except Exception as e:
+        print(f"Error calculating checksum for {file_path}: {str(e)}")
+        raise
+
