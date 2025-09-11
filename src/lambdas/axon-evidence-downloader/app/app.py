@@ -100,7 +100,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         # Construct url
-        base_url = ssm_parameters['base_url']
+        base_url = ssm_parameters["base_url"]
         evidence_file_url = construct_evidence_file_url(
             base_url, source_agency, evidence_id, evidence_file_id
         )
@@ -123,7 +123,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         # Calculate checksum
         file_checksum = calculate_file_checksum(file_path)
-
 
         logger.log(
             event=event,
@@ -286,6 +285,7 @@ def get_ssm_parameters(
 
         raise
 
+
 def construct_evidence_file_url(
     base_url: str, source_agency: str, evidence_id: str, evidence_file_id: str
 ) -> str:
@@ -301,10 +301,11 @@ def construct_evidence_file_url(
     Returns:
         str: The constructed URL
     """
-    base_url = base_url.rstrip('/')
+    base_url = base_url.rstrip("/")
     url = f"{base_url}/api/v1/agencies/{source_agency}/evidence/{evidence_id}/files/{evidence_file_id}"
 
     return url
+
 
 def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -> str:
     """
@@ -331,22 +332,26 @@ def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -
     http = urllib3.PoolManager()
 
     try:
-        # Make the request
-        response = http.request("GET", url, headers=headers, timeout=300)
+        # Make the request with streaming to minimize memory usage
+        response = http.request(
+            "GET", url, headers=headers, timeout=300, preload_content=False
+        )
 
         if response.status != 200:
             raise Exception(f"HTTP {response.status}: {response.reason}")
 
-        # Write the file to /tmp
+        # Stream the file directly to ephemeral storage (/tmp)
         with open(file_path, "wb") as f:
-            f.write(response.data)
+            for chunk in response.stream(8192):  # 8KB chunks
+                f.write(chunk)
 
         # Verify file was written
         if not os.path.exists(file_path):
             raise Exception(f"File was not created at {file_path}")
 
         file_size = os.path.getsize(file_path)
-        print(f"Successfully downloaded file: {file_path} ({file_size} bytes)")
+        file_size = round(file_size / (1024 * 1024 * 1024), 2)
+        print(f"Successfully downloaded file: {file_path} ({file_size}GB)")
 
         return file_path
 
@@ -357,37 +362,37 @@ def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -
             os.remove(file_path)
         raise
 
+
 def calculate_file_checksum(file_path: str) -> str:
     """
     Calculate checksum of a file.
-    
+
     Args:
         file_path: Path to the file
-        
+
     Returns:
         str: Hexadecimal checksum string
-        
+
     Raises:
         FileNotFoundError: If file doesn't exist
         ValueError: If algorithm is not supported
     """
     # Create hash object
-    hash_obj = hashlib.new('sha256')
-    
+    hash_obj = hashlib.new("sha256")
+
     try:
         # Read file in chunks to handle large files efficiently
-        with open(file_path, 'rb') as f:
+        with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 hash_obj.update(chunk)
-        
+
         checksum = hash_obj.hexdigest()
         print(f"Calculated sha256 checksum for {file_path}: {checksum}")
         return checksum
-        
+
     except FileNotFoundError:
         print(f"File not found: {file_path}")
         raise
     except Exception as e:
         print(f"Error calculating checksum for {file_path}: {str(e)}")
         raise
-
