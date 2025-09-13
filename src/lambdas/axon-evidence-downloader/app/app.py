@@ -52,7 +52,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.log_start(event="axon_evidence_downloader", job_id=request_id)
 
         records = event.get("Records", [])
-        record = records[0]
+        record: dict = records[0]
         message_id = record.get("messageId")
         logger.log(
             event=event,
@@ -122,7 +122,21 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         # Calculate checksum
-        file_checksum = calculate_file_checksum(file_path)
+        calculated_checksum = calculate_file_checksum(file_path)
+
+        # Compare checksum (calculated vs database)
+        is_valid = db_manager.verify_file_checksum(evidence_file_id, calculated_checksum)
+
+        if is_valid:
+            print("Checksum verified - proceeding with processing")
+        else:
+            queue_url = ssm_parameters['evidence_download_queue_url']
+            requeue_success = requeue_message_on_checksum_failure(record, queue_url)
+
+            return {
+                "statusCode": 400,
+                "message": f"Checksum not verified - terminating processing",
+            }
 
         logger.log(
             event=event,
@@ -179,6 +193,7 @@ def get_ssm_parameters(
     parameter_paths = {
         "bearer": f"/{env_stage}/axon/api/bearer",
         "base_url": f"/{env_stage}/axon/api/base_url",
+        "evidence_download_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download",
     }
 
     parameters = {}
@@ -396,3 +411,63 @@ def calculate_file_checksum(file_path: str) -> str:
     except Exception as e:
         print(f"Error calculating checksum for {file_path}: {str(e)}")
         raise
+
+
+def requeue_message_on_checksum_failure(original_record: dict, queue_url: str) -> bool:
+    """
+    Requeue the original SQS message back to the queue when checksum verification fails.
+    
+    Args:
+        original_event: The original Lambda event containing SQS message
+        ssm_parameters: Dictionary containing queue_url and other parameters
+        
+    Returns:
+        bool: True if message was successfully requeued, False otherwise
+    """
+    try:        
+        sqs_client = boto3.client('sqs', region_name='ca-central-1')
+
+        # Extract message details
+        message_body = original_record.get('body')
+        message_attributes = original_record.get('messageAttributes', {})
+        
+        # Convert message attributes to the format expected by SQS send_message
+        formatted_attributes = {}
+        for key, value in message_attributes.items():
+            if isinstance(value, dict):
+                formatted_attributes[key] = {
+                    'StringValue': value.get('stringValue', ''),
+                    'DataType': value.get('dataType', 'String')
+                }
+        
+        # Parse message body to get job_id and evidence_file_id for FIFO queue requirements
+        try:
+            body_data = json.loads(message_body)
+            job_id = body_data.get('job_id')
+            evidence_id = body_data.get('evidence_id')
+        except json.JSONDecodeError:
+            print("Error: Could not parse message body JSON")
+            return False
+        
+        # Prepare message for requeuing (FIFO queue format)
+        message_params = {
+            'QueueUrl': queue_url,
+            'MessageBody': message_body,
+            'MessageGroupId': f"job-{job_id}",
+            'MessageDeduplicationId': f"{job_id}-{evidence_id}"
+        }
+        
+        # Add message attributes if they exist
+        if formatted_attributes:
+            message_params['MessageAttributes'] = formatted_attributes
+        
+        # Send message back to queue
+        response = sqs_client.send_message(**message_params)
+        
+        message_id = response.get('MessageId')
+        print(f"Successfully requeued message to SQS. MessageId: {message_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error requeuing message to SQS: {str(e)}")
+        return False

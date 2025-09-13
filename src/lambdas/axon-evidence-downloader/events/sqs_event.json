@@ -3,17 +3,30 @@
     {
       "messageId": "test-message-123",
       "receiptHandle": "test-receipt-handle",
-      "body": "{\"evidence_id\": \"2f9f8d38-9968-4482-a500-17bb3ac404c8\", \"evidence_file_id\": \"45edbdb1-bae7-4fbd-bf18-f06de8fc441d\", \"job_id\": \"a75ac1a6-2bca-49be-971e-247baf0f78bc\"}",
+      "body": "{\"job_id\": \"a75ac1a6-2bca-49be-971e-247baf0f78bc\", \"evidence_id\": \"2f9f8d38-9968-4482-a500-17bb3ac404c8\", \"evidence_file_id\": \"45edbdb1-bae7-4fbd-bf18-f06de8fc441d\"}",
       "attributes": {
         "ApproximateReceiveCount": "1",
         "SentTimestamp": "1693123456789",
         "SenderId": "AIDAIENQZJOLO23YVJ4VO",
         "ApproximateFirstReceiveTimestamp": "1693123456789"
       },
-      "messageAttributes": {},
+      "messageAttributes": {
+        "JobId": {
+          "stringValue": "a75ac1a6-2bca-49be-971e-247baf0f78bc",
+          "dataType": "String"
+        },
+        "evidence_id": {
+          "stringValue": "2f9f8d38-9968-4482-a500-17bb3ac404c8",
+          "dataType": "String"
+        },
+        "evidence_file_id": {
+          "stringValue": "45edbdb1-bae7-4fbd-bf18-f06de8fc441d",
+          "dataType": "String"
+        }
+      },
       "md5OfBody": "test-md5-hash",
       "eventSource": "aws:sqs",
-      "eventSourceARN": "arn:aws:sqs:ca-central-1:123456789012:file-download-queue",
+      "eventSourceARN": "arn:aws:sqs:ca-central-1:123456789012:file-download-queue.fifo",
       "awsRegion": "ca-central-1"
     }
   ]

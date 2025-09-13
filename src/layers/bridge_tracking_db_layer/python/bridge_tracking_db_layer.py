@@ -635,7 +635,46 @@ class DatabaseManager:
         if result and len(result) > 0:
             return result[0]['source_agency']
         return None
-    
+
+    def verify_file_checksum(self, evidence_file_id: str, calculated_checksum: str) -> bool:
+        """
+        Verify if calculated checksum matches the database stored checksum.
+        
+        Args:
+            evidence_file_id: The evidence file ID to look up
+            calculated_checksum: The checksum calculated from downloaded file
+            
+        Returns:
+            bool: True if checksums match (count = 1), False otherwise
+        """
+        query = """
+            SELECT COUNT(*) as match_count
+            FROM evidence_files 
+            WHERE evidence_file_id = %s 
+            AND LOWER(checksum) = LOWER(%s)
+        """
+        
+        try:
+            result = self.execute_query(query, (evidence_file_id, calculated_checksum))
+            
+            if result and len(result) > 0:
+                match_count = result[0]['match_count']
+                
+                if match_count == 1:
+                    print(f"Checksum verification PASSED for evidence_file_id {evidence_file_id}")
+                    return True
+                else:
+                    print(f"Checksum verification FAILED for evidence_file_id {evidence_file_id}")
+                    print(f"Match count: {match_count} (expected: 1)")
+                    return False
+            else:
+                print(f"No result returned from checksum verification query")
+                return False
+                
+        except Exception as e:
+            print(f"Error verifying checksum for evidence_file_id {evidence_file_id}: {str(e)}")
+            return False
+
     # Utility methods
     def health_check(self) -> Dict[str, Any]:
         """Check database health."""
