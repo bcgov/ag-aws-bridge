@@ -3,6 +3,7 @@ import json
 import boto3
 import time
 import os
+import requests
 from typing import List, Dict, Any, Optional, Tuple
 import botocore.exceptions
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
@@ -32,12 +33,14 @@ logger = LambdaStructuredLogger()
 # Global configuration cache
 _lambda_config = None
 
-def get_lambda_config(ssm=None) -> Dict[str, str]:
+def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
     """Get Lambda-specific configuration from SSM Parameter Store."""
     global _lambda_config
     
     if _lambda_config is not None:
         return _lambda_config
+    
+    start_time = time.time()
     
     try:
         if ssm is None:
@@ -51,6 +54,10 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
         parameter_paths = {
             'axon_bearer_token': f'/{env_stage}/axon/api/bearer',
             'axon_agency_id': f'/{env_stage}/axon/api/agency_id',
+            'axon_base_url': f'/{env_stage}/axon/api/base_url',
+            'axon_client_id': f'/{env_stage}/axon/api/client_id',
+            'axon_client_secret': f'/{env_stage}/axon/api/client_secret',
+            'axon_auth_url': f'/{env_stage}/axon/api/authentication_url',
             'axon_get_case_details_url': f'/{env_stage}/axon/api/get_case_details_url',
             'axon_get_evidence_details_url': f'/{env_stage}/axon/api/get_evidence_details_url',
             'normal_download_queue_url': f'/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download',
@@ -59,28 +66,47 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
         }
         
         parameter_names = list(parameter_paths.values())
+        max_parameters_per_request = 10  # AWS SSM limit
         
-        # Get all parameters in a single call for efficiency
-        response = ssm.get_parameters(
-            Names=parameter_names,
-            WithDecryption=True  # Decrypt SecureString parameters (bearer token)
-        )
+        # Split parameter names into chunks of 10 or fewer
+        parameter_chunks = [parameter_names[i:i + max_parameters_per_request] 
+                           for i in range(0, len(parameter_names), max_parameters_per_request)]
         
+        config = {}
+        all_parameters = []
+        missing_params = []
+        
+        # Fetch parameters in chunks
+        for chunk in parameter_chunks:
+            response = ssm.get_parameters(
+                Names=chunk,
+                WithDecryption=True
+            )
+            all_parameters.extend(response['Parameters'])
+        # Calculate response time
+        response_time_ms = (time.time() - start_time) * 1000
         # Check if any parameters were not found
-        if len(response['Parameters']) != len(parameter_names):
-            missing_params = set(parameter_names) - {p['Name'] for p in response['Parameters']}
+        if len(all_parameters) != len(parameter_names):
+            missing_params = set(parameter_names) - {p['Name'] for p in all_parameters}
             raise ValueError(f"Missing SSM parameters: {missing_params}")
         
         # Build configuration dictionary
-        config = {}
-        for param in response['Parameters']:
+        for param in all_parameters:
             for key, path in parameter_paths.items():
                 if param['Name'] == path:
                     config[key] = param['Value']
                     break
-        
+          # Log retrieval status
+        logger.log_ssm_parameter_collection(
+            parameter_names=list(config.keys()),
+            parameters_collected=config,
+            response_time_ms=response_time_ms,
+            invalid_parameters=missing_params if missing_params else None,
+            **context_data
+        )
+
         _lambda_config = config
-        logger.log_success( event=Constants.PROCESS_NAME,message=f"Lambda configuration loaded from SSM for environment: {env_stage}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Lambda configuration loaded from SSM for environment: {env_stage}")
         
         return _lambda_config
         
@@ -276,36 +302,31 @@ def update_job_status(db_manager: DatabaseManager, job_id: str, status_value: st
             last_modified_process="lambda: rcc and dems case validator"
         )
 # API functions using configuration from SSM
-def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[str, str]) -> List[Dict]:
+def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[str, str],context_data=None) -> List[Dict]:
     """Get case evidence from Axon API using configuration from SSM."""
-    import requests
     
     try:
+        #get_axon_bearer(config=config, job_id=job_id, event="get_evendice_from_api", context_data=context_data)
         headers = {
             'Authorization': f'Bearer {config["axon_bearer_token"]}',
             'Content-Type': 'application/json'
         }
-        
-        # Build the API URL with agency_id and case_id
-        api_url =  config['axon_get_case_details_url'] + '/api/v2/agencies/' + config['axon_agency_id'] + '/cases/{source_case_id}/relationships/evidence'
        
+        # Build the API URL with agency_id and case_id
+        api_url =  config['axon_base_url'] + 'api/v2/agencies/' + config['axon_agency_id'] + '/cases/' + source_case_id + '/relationships/evidence/'
+        logger.log_success(event="Put together API URL for axon call", message="API URL : " + api_url)
         # init return List of Dict objects
         return_values = []
-
-        # # Replace placeholders in URL if needed, or build query parameters
-        # params = {
-        #     'agency_id': config['axon_agency_id'],
-        #     'case_id': source_case_id
-        # }
+       
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
       
         start_time = time.perf_counter()
     
         response_time = time.perf_counter() - start_time
-        response = requests.get(api_url, headers=headers, timeout=30, verify=True)
-        response.raise_for_status()
-        json_data = json.loads(response.data.decode('utf-8'))
-        
+        response = requests.get(api_url, headers=headers, timeout=30)
+        #response.raise_for_status()
+        json_data = json.loads(response.json())
+        print ("json evidence data : " + json_data)
         #Extract meta data
         api_meta_data = json_data.get('meta')
         case_evidence_count = int(api_meta_data.get('count'))
@@ -315,7 +336,7 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
         evidence_list = json_data.get('evidence', [])
 
         if  case_evidence_count <= 1:
-                logger.log_api()
+                
                 return_values.append(evidence_list)
                 return_values.append("case_evidence_count : " , case_evidence_count)
                 logger.log_api_call(
@@ -482,9 +503,9 @@ def persist_and_queue(
             'statusCode': 500,
             'body': json.dumps({'error': f'Processing failed: {str(e)}'})
         }
-def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
-    config = get_lambda_config()
-    evidence_list = retrieve_case_evidence(source_case_id, job_id, config)
+def process_case_evidence_with_sqs(job_id: str, source_case_id: str, context_data:None):
+    config = get_lambda_config(context_data=context_data)
+    evidence_list = retrieve_case_evidence(source_case_id, job_id, config, context_data)
     files_to_create, normal_sqs_messages, oversize_sqs_messages = process_evidence_records(
         evidence_list, job_id, source_case_id, config
     )
@@ -492,9 +513,10 @@ def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
         files_to_create, normal_sqs_messages, oversize_sqs_messages, job_id, source_case_id, config
     )
 
-def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, str]) -> List[Dict]:
+def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, str], context_data:None) -> List[Dict]:
     """Fetch evidence list from Axon API."""
-    evidence_list = get_case_evidence_from_api(source_case_id, job_id, config)
+    logger.log_success(event="retrieve case evidence", message="calling retrieve case evidence")
+    evidence_list = get_case_evidence_from_api(source_case_id, job_id, config, context_data=context_data)
     logger.log_success(event=Constants.PROCESS_NAME, message=json.dumps({
             'message': 'Retrieved evidence list',
             'source_case_id': source_case_id,
@@ -615,17 +637,12 @@ def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> D
         }
         
         # Build the API URL
-        api_url = config['axon_get_evidence_details_url']
-        
-        # Replace placeholders or build query parameters
-        params = {
-            'agency_id': config['axon_agency_id'],
-            'evidence_id': evidence_id
-        }
+        api_url =  config['axon_base_url'] + '/api/v2/agencies/' + config['axon_agency_id'] + '/evidence/' + evidence_id 
+        #api_url = config['axon_get_evidence_details_url']
         
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
         
-        response = requests.get(api_url, headers=headers, params=params, timeout=30,verify=True)
+        response = requests.get(api_url, headers=headers, params={"evidence_id:" + evidence_id}, timeout=30,verify=True)
         response.raise_for_status()
         
         evidence_details = response.json()
@@ -640,18 +657,221 @@ def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> D
     except Exception as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
         raise
+# Get Axon bearer token
+def get_axon_bearer(config: Dict[str, str],  job_id:str, event,context_data=None):
+       # Add API method
+        
+        api_url =  config['axon_base_url']  + config['axon_auth_url']
+        logger.log_success(
+                event="api_call",
+                message="Bearer token retrieval attempt url : " + api_url,
+                job_id=job_id)
+                
+        #https://bcps-dev.ca.evidence.com/api/oauth2/token
+        # Get API bearer token
+        try:
+            payload = {
+            "client_id": config['axon_client_id'],
+            "grant_type": "client_credentials",
+            "client_secret": config['axon_client_secret']
+            }
+            # Convert payload to URL-encoded format
+           # encoded_payload = requests.parse.urlencode(payload).encode('utf-8')
+            
+            response = requests.post(
+               
+                url=api_url,
+                data=payload,
+                timeout=30,  # 30 second timeout
+                headers={'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'}
+            )
+            
+             # Calculate response time in milliseconds
+            response_time_ms = response.elapsed.total_seconds() * 1000
 
+            # Log the API call
+            logger.log_api_call(
+            event=Constants.PROCESS_NAME,
+            url=api_url,
+            method="POST",
+            status_code=response.status_code,
+            response_time=response_time_ms
+            )
+
+            # Log the response status
+            logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="log_token_authentication",
+            context_data={
+               
+                "status_code": response.status_code,
+                "response_time_ms": response_time_ms,
+                "operation": "token_retrieval_response_received",
+            },
+            )
+            logger.log_success(
+                event="api_call",
+                message="Bearer token retrieval success",
+                job_id=job_id,
+                custom_metadata={"status_code": response.status, "url": api_url}
+            )
+             # Check if the request was successful
+            if response.status_code == 200:
+                token_data = response.json()
+                access_token = token_data.get("access_token")
+            
+                if not access_token:
+                    logger.log(
+                    event=event,
+                    level=LogLevel.ERROR,
+                    status=LogStatus.FAILURE,
+                    message="log_token_authentication",
+                    context_data={
+                        
+                        "response_keys": list(token_data.keys()),
+                        "operation": "token_retrieval_missing_token",
+                    },
+                    )
+                    raise ValueError("Access token not found in response")
+
+                # Log successful token retrieval (without exposing the token)
+                logger.log(
+                    event=event,
+                    level=LogLevel.INFO,
+                    status=LogStatus.SUCCESS,
+                    message="log_token_authentication",
+                    context_data={
+                   
+                    "token_type": token_data.get("token_type", "unknown"),
+                    "expires_in": token_data.get("expires_in"),
+                    "has_refresh_token": "refresh_token" in token_data,
+                    "operation": "token_retrieval_success",
+                },
+                )
+                #data = json.loads(response.text)  # Decode response properly
+                config['axon_bearer_token'] = access_token
+            else:
+                # Handle HTTP errors
+                error_detail = "Unknown error"
+                try:
+                    error_response = response.json()
+                    error_detail = error_response.get("error_description", 
+                              error_response.get("error", "Unknown error"))
+                except:
+                    error_detail = response.text[:200]  # First 200 chars of response
+
+                logger.log(
+                    event=event,
+                    level=LogLevel.ERROR,
+                    status=LogStatus.FAILURE,
+                    message="log_token_authentication",
+                    context_data={
+                      
+                    "status_code": response.status_code,
+                    "error_detail": error_detail,
+                    "operation": "token_retrieval_http_error",
+                },
+                )
+
+        #     raise Exception(f"Token request failed with status {response.status_code}: {error_detail}")  
+        # except requests.exceptions.Timeout:
+        # # Log API call for timeout
+        #     logger.log_api_call(
+        #     event=event,
+        #     url=api_url,
+        #     method="POST",
+        #     status_code=0,
+        #     response_time=30000,  # timeout duration in ms
+        #     error="timeout",
+        #     # **context_data
+        #     )
+        
+        #     logger.log(
+        #     event=event,
+        #     level=LogLevel.ERROR,
+        #     status=LogStatus.FAILURE,
+        #     message="log_token_authentication",
+        #     context_data={
+        #         **context_data,
+        #         "error": "Request timeout",
+        #         "operation": "token_retrieval_timeout",
+        #     },
+        #     )
+    
+        # except requests.exceptions.ConnectionError:
+        # # Log API call for connection error
+        #     logger.log_api_call(
+        #     event=event,
+        #     url=api_url,
+        #     method="POST",
+        #     status_code=0,
+        #     response_time=0,
+        #     error="connection_error",
+        #      **context_data
+        #     )
+        
+        #     logger.log(
+        #     event=event,
+        #     level=LogLevel.ERROR,
+        #     status=LogStatus.FAILURE,
+        #     message="log_token_authentication",
+        #     context_data={
+        #         **context_data,
+        #         "error": "Connection error",
+        #         "operation": "token_retrieval_connection_error",
+        #     },
+        #     )
+        except Exception as e :
+               logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="bearer retrieval error",
+            context_data={
+               
+                "parameter_name": "bearer token",
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "response_time_ms": response_time_ms,
+                "operation": "token_retrieval_unexpected_error",
+            },
+        )
+
+        raise Exception("Failed to connect to authentication server")
+
+        
+
+     
 # Lambda handler
 def lambda_handler(event, context):
     """Main Lambda handler for evidence processing."""
     try:
         """Main Lambda handler function."""
-       
+       # Log environment information
+        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
         logger.log_start(event="Case Detail and Evidence Filter Start", job_id=context.aws_request_id)
 
+         # Base context data for all log entries
+        base_context = {
+        "request_id": context.aws_request_id,
+        "function_name": context.function_name,
+        "env_stage": env_stage,
+        }
         # Extract job_id and source_case_id from event (matches your trigger)
-        job_id = event.get('job_id')
-        source_case_id = event.get('source_case_id')
+        for record in event["Records"]:
+            message_attributes = record.get('messageAttributes', {})
+             # Retrieve job_id
+            if 'job_id' in message_attributes:
+                attr = message_attributes['job_id']
+                job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
+            
+            # Retrieve source_case_id
+            if 'source_case_id' in message_attributes:
+                attr = message_attributes['source_case_id']
+                source_case_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
+
         
         if not job_id or not source_case_id:
             logger.log_error(event=Constants.PROCESS_NAME,error=Exception("'job_id and source_case_id are required"),job_id=context.aws_request_id)
@@ -663,16 +883,15 @@ def lambda_handler(event, context):
                 })
             }
         
-        # Log environment information
-        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+        
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
         
        
-        results  = process_case_evidence_with_sqs(job_id, source_case_id)
+        results  = process_case_evidence_with_sqs(job_id, source_case_id, context_data=base_context)
         results_json = json.loads(results)
 
         logger.log_success(
-            event="Verify Dems Case End",
+            event="Case Detail Evidence Filter End",
             message="Successfully completed AxonCaseDetailEvidenceFilter execution",
             job_id=context.aws_request_id
          )
