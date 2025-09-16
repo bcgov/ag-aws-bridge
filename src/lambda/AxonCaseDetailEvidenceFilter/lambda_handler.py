@@ -305,8 +305,14 @@ def update_job_status(db_manager: DatabaseManager, job_id: str, status_value: st
 def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[str, str],context_data=None) -> List[Dict]:
     """Get case evidence from Axon API using configuration from SSM."""
     
+    return_values = []
     try:
         #get_axon_bearer(config=config, job_id=job_id, event="get_evendice_from_api", context_data=context_data)
+
+        if not config["axon_bearer_token"]:
+            print ("Token is None or empty")
+            return return_values
+
         headers = {
             'Authorization': f'Bearer {config["axon_bearer_token"]}',
             'Content-Type': 'application/json'
@@ -316,7 +322,7 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
         api_url =  config['axon_base_url'] + 'api/v2/agencies/' + config['axon_agency_id'] + '/cases/' + source_case_id + '/relationships/evidence/'
         logger.log_success(event="Put together API URL for axon call", message="API URL : " + api_url)
         # init return List of Dict objects
-        return_values = []
+      
        
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
       
@@ -324,9 +330,12 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
     
         response_time = time.perf_counter() - start_time
         response = requests.get(api_url, headers=headers, timeout=30)
-        #response.raise_for_status()
-        json_data = json.loads(response.json())
-        print ("json evidence data : " + json_data)
+        response.raise_for_status()
+        if response.status_code == 200:
+            print ("response data : " + response.text)
+
+        json_data = response.json()
+        print ("json evidence data : " + response.json())
         #Extract meta data
         api_meta_data = json_data.get('meta')
         case_evidence_count = int(api_meta_data.get('count'))
@@ -346,7 +355,8 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
                     status_code=response.status,
                     response_time=response_time,
                     job_id=job_id
-    )
+                )
+                return return_values
 
         elif case_evidence_count == 0:
               # Log the error in structured JSON format
@@ -369,7 +379,7 @@ def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[s
                 last_modified_process=Constants.PROCESS_NAME
             )
         
-        return evidence_list
+        return return_values
         
     except requests.exceptions.RequestException as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
