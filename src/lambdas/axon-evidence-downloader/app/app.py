@@ -138,6 +138,32 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "message": f"Checksum not verified - terminating processing",
             }
 
+        # Update Tracking Database - evidence_file
+        evidence_file_update_success = db_manager.update_evidence_file_downloaded(evidence_file_id)
+
+        # Update Tracking Database - evidence_transfer_jobs
+        if evidence_file_update_success:
+            job_update_success = db_manager.increment_job_download_count(job_id)
+
+        # Final evaluation
+        if job_update_success:
+            job_result = db_manager.evaluate_job_completion_status(job_id)
+        
+        count_to_download = job_result['count_to_download'] or 0
+        count_downloaded_tracked = job_result['count_downloaded_tracked'] or 0
+        all_counts_match = job_result['all_counts_match'] or 0
+            
+        if all_counts_match:
+            # Happy-Path
+            # Log 1: Individual file success
+            print(f"job: {job_id} [case evidence file downloaded successfully: evidenceId ({evidence_id}) fileId ({evidence_file_id}) expected = {count_to_download}; downloaded = {count_downloaded_tracked}]")
+            
+            # Log 2: All files complete
+            print(f"job: {job_id} [case evidence files downloaded successfully. expected = {count_to_download}; downloaded = {count_downloaded_tracked}]")
+        else:
+            # Alternate-Path: One log message
+            print(f"job: {job_id} [case evidence file downloaded successfully: evidenceId ({evidence_id}) fileId ({evidence_file_id}) expected = {count_to_download}; downloaded = {count_downloaded_tracked}]")
+
         logger.log(
             event=event,
             level=LogLevel.INFO,

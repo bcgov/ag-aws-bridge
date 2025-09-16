@@ -122,18 +122,19 @@ class DatabaseManager:
             if connection:
                 self.connection_pool.putconn(connection)
     
-    def execute_query(self, query: str, params: tuple = None) -> List[Dict]:
+    def execute_query(self, query: str, params: tuple = None, autoCommit: bool=False) -> List[Dict]:
         """Execute a query and return results as list of dictionaries."""
         with self.get_connection() as conn:
+            conn.autocommit = autoCommit
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, params)
                 if cursor.description:
                     return [dict(row) for row in cursor.fetchall()]
                 return []
     
-    def execute_query_one(self, query: str, params: tuple = None) -> Optional[Dict]:
+    def execute_query_one(self, query: str, params: tuple = None, autoCommit: bool=False) -> Optional[Dict]:
         """Execute a query and return first result as dictionary."""
-        results = self.execute_query(query, params)
+        results = self.execute_query(query, params, autoCommit)
         return results[0] if results else None
     
     def execute_transaction(self, queries: List[Tuple[str, tuple]]) -> List[Dict]:
@@ -674,6 +675,148 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error verifying checksum for evidence_file_id {evidence_file_id}: {str(e)}")
             return False
+
+    def update_evidence_file_downloaded(self, evidence_file_id: str) -> bool:
+        """
+        Update evidence_file record to mark as downloaded.
+        
+        Args:
+            evidence_file_id: The evidence file ID to update
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        current_utc = datetime.utcnow()
+        
+        query = """
+            UPDATE evidence_files 
+            SET 
+                axon_is_downloaded = true,
+                evidence_transfer_state_code = 45,
+                axon_download_utc = %s,
+                last_modified_process = %s,
+                last_modified_utc = %s
+            WHERE evidence_file_id = %s
+            RETURNING evidence_file_id
+        """
+        
+        try:
+            params = (
+                current_utc,
+                'lambda: axon evidence downloader',
+                current_utc,
+                evidence_file_id
+            )
+            
+            result = self.execute_query_one(query, params, True)
+            
+            if result:
+                print(f"Successfully updated evidence_file record for evidence_file_id: {evidence_file_id}")
+                return True
+            else:
+                print(f"No record found to update for evidence_file_id: {evidence_file_id}")
+                return False
+            
+        except Exception as e:
+            print(f"Error updating evidence_file record for evidence_file_id {evidence_file_id}: {str(e)}")
+            return False
+
+    def increment_job_download_count(self, job_id: str) -> bool:
+        """
+        Increment the source_case_evidence_count_downloaded for a job.
+        
+        Args:
+            job_id: The job ID to update
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        query = """
+            UPDATE evidence_transfer_jobs 
+            SET source_case_evidence_count_downloaded = source_case_evidence_count_downloaded + 1,
+                last_modified_utc = %s
+            WHERE job_id = %s
+            RETURNING job_id, source_case_evidence_count_downloaded
+        """
+        
+        try:
+            current_utc = datetime.utcnow()
+            params = (current_utc, job_id)
+            
+            result = self.execute_query_one(query, params, True)
+            
+            if result:
+                print(f"Successfully incremented download count for job_id: {job_id}")
+                print(f"New download count: {result['source_case_evidence_count_downloaded']}")
+                return True
+            else:
+                print(f"No job record found for job_id: {job_id}")
+                return False
+            
+        except Exception as e:
+            print(f"Error incrementing download count for job_id {job_id}: {str(e)}")
+            return False
+
+
+    def evaluate_job_completion_status(self, job_id: str) -> dict:
+        """
+        Evaluate if all evidence files for a job have been downloaded.
+        
+        Args:
+            job_id: The job ID to evaluate
+            
+        Returns:
+            dict: Completion status and counts
+        """
+        try:
+            # 1. Query evidence_transfer_jobs for counts and status
+            job_query = """
+                SELECT source_case_evidence_count_to_download,
+                    source_case_evidence_count_downloaded
+                FROM evidence_transfer_jobs 
+                WHERE job_id = %s
+            """
+            
+            job_result = self.execute_query_one(job_query, (job_id,))
+            if not job_result:
+                return {'error': f'Job not found: {job_id}'}
+            
+            # 2. Query evidence_files table for actual downloaded count
+            files_query = """
+                SELECT COUNT(*) as actual_downloaded_count
+                FROM evidence_files 
+                WHERE job_id = %s AND axon_is_downloaded = true
+            """
+            
+            files_result = self.execute_query_one(files_query, (job_id,))
+            actual_downloaded = files_result['actual_downloaded_count'] if files_result else 0
+            
+            # Extract values
+            count_to_download = job_result['source_case_evidence_count_to_download'] or 0
+            count_downloaded_tracked = job_result['source_case_evidence_count_downloaded'] or 0
+            
+            result = {
+                'job_id': job_id,
+                'count_to_download': count_to_download,
+                'count_downloaded_tracked': count_downloaded_tracked,
+                'actual_downloaded_count': actual_downloaded,
+                'all_counts_match': False,
+            }
+            
+            # 3. Evaluate if all counts match (all files downloaded)
+            all_counts_match = (
+                actual_downloaded == count_to_download and
+                actual_downloaded == count_downloaded_tracked and
+                count_to_download > 0  # Ensure we have files to download
+            )
+            result['all_counts_match'] = all_counts_match
+
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error evaluating job completion for job_id {job_id}: {str(e)}"
+            print(error_msg)
+            return {'error': error_msg}
 
     # Utility methods
     def health_check(self) -> Dict[str, Any]:
