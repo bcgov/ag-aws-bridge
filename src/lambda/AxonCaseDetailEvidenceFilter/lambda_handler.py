@@ -15,12 +15,6 @@ from bridge_tracking_db_layer import (
     get_evidence_transfer_job, update_job_status, StatusCodes,
     
 )
-
-class StatusCodes(Enum):
-    DOWNLOAD_READY = "DOWNLOAD_READY"
-    DOWNLOAD_READY_OVERSIZE = "DOWNLOAD_READY_OVERSIZE"
-    VALID_CASE = "VALID_CASE"
-    NO_NEW_EVIDENCE_FOUND = "NO-NEW-EVIDENCE-FOUND"
     
 class Constants:
     PROCESS_NAME = "axon-case-detail-and-evidence-filter"
@@ -28,7 +22,7 @@ class Constants:
     SQS_BATCH_SIZE = 10
 
 logger = LambdaStructuredLogger()
-
+db_manager = None
 
 # Global configuration cache
 _lambda_config = None
@@ -114,6 +108,15 @@ def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
         raise
 
+def initialize_db_manager():
+    """Initialize the global DatabaseManager instance."""
+    global db_manager
+    if db_manager is None:
+        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+        db_manager = get_db_manager(env_param_in=env_stage)
+        db_manager._initialize_pool()
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Initialized DatabaseManager for environment: {env_stage}")
+
 def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: str = None, 
                           source_case_id: str = None, error_message: str = None):
     """Send exception message to exception queue for manual review."""
@@ -126,7 +129,9 @@ def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: s
             'source_case_id': source_case_id,
             'error_message': error_message,
             'lambda_function': 'evidence-processor',
-            'timestamp': boto3.Session().region_name  # Will be overridden by SQS
+            'timestamp': time.time()
+
+  # Will be overridden by SQS
         }
         
         sqs.send_message(
@@ -290,104 +295,87 @@ def format_file_size(size_bytes: int) -> str:
     else:
         return f"{size_bytes} bytes"
 
-def update_job_status(db_manager: DatabaseManager, job_id: str, status_value: str, logger: LambdaStructuredLogger):
+def lambda_update_job_status( job_id: str, status_value: str, msg:str):
     """Update job status in the database."""
-    update_job_status = db_manager.get_status_code_by_value(value=status_value)
-    if update_job_status:
-        status_identifier = str(update_job_status["identifier"])
+    job_status_code = db_manager.get_status_code_by_value(value=status_value)
+    if job_status_code:
+        status_identifier = str(job_status_code["identifier"])
         db_manager.update_job_status(
             job_id=job_id,
             status_code=status_identifier,
-            job_msg="",
-            last_modified_process="lambda: rcc and dems case validator"
+            job_msg=msg,
+            last_modified_process="lambda: case detail filter"
         )
 # API functions using configuration from SSM
-def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[str, str],context_data=None) -> List[Dict]:
+def get_case_evidence_from_api(source_case_id: str, job_id: str, config: Dict[str, str], context_data=None) -> List[Dict]:
     """Get case evidence from Axon API using configuration from SSM."""
-    
     return_values = []
     try:
-        #get_axon_bearer(config=config, job_id=job_id, event="get_evendice_from_api", context_data=context_data)
-
-        if not config["axon_bearer_token"]:
-            print ("Token is None or empty")
+        if not config or not config.get("axon_bearer_token"):
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("Configuration or bearer token missing"))
             return return_values
 
         headers = {
             'Authorization': f'Bearer {config["axon_bearer_token"]}',
             'Content-Type': 'application/json'
         }
-       
-        # Build the API URL with agency_id and case_id
-        api_url =  config['axon_base_url'] + 'api/v2/agencies/' + config['axon_agency_id'] + '/cases/' + source_case_id + '/relationships/evidence/'
-        logger.log_success(event="Put together API URL for axon call", message="API URL : " + api_url)
-        # init return List of Dict objects
-      
-       
+        api_url = f"{config['axon_base_url']}api/v2/agencies/{config['axon_agency_id']}/cases/{source_case_id}/relationships/evidence"
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
-      
+
         start_time = time.perf_counter()
-    
-        response_time = time.perf_counter() - start_time
         response = requests.get(api_url, headers=headers, timeout=30)
         response.raise_for_status()
-        if response.status_code == 200:
-            print ("response data : " + response.text)
 
-        json_data = response.json()
-        print ("json evidence data : " + response.json())
-        #Extract meta data
-        api_meta_data = json_data.get('meta')
-        case_evidence_count = int(api_meta_data.get('count'))
-        
-        # Extract evidence list from response
-        # Adjust this based on actual Axon API response structure
+        try:
+            json_data = response.json()
+        except ValueError as e:
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Failed to parse JSON response: {str(e)}"))
+            return return_values
+
+        if not json_data:
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
+            return return_values
+
+        api_meta_data = json_data.get('meta', {})
+        case_evidence_count = int(api_meta_data.get('count', 0))
         evidence_list = json_data.get('evidence', [])
 
-        if  case_evidence_count <= 1:
-                
-                return_values.append(evidence_list)
-                return_values.append("case_evidence_count : " , case_evidence_count)
-                logger.log_api_call(
-                    event="Axon Get Case Evidence call",
-                    url=api_url,
-                    method="GET",
-                    status_code=response.status,
-                    response_time=response_time,
-                    job_id=job_id
-                )
-                return return_values
+        response_time = (time.perf_counter() - start_time) * 1000
+        logger.log_api_call(
+            event="Axon Get Case Evidence call",
+            url=api_url,
+            method="GET",
+            status_code=response.status_code,
+            response_time=response_time,
+            job_id=job_id
+        )
 
-        elif case_evidence_count == 0:
-              # Log the error in structured JSON format
+        if case_evidence_count == 0:
             log_data = {
-            'case_metadata' : {
-                "source_case_id": source_case_id,
-                "source_case_title": "PO-2025-99001",
-                "source_case_evidence_count_total": case_evidence_count,
-                "source_case_evidence_count_to_download":case_evidence_count ,
-                "source_case_evidence_count_downloaded": 0
-            }
+                'case_metadata': {
+                    "source_case_id": source_case_id,
+                    "source_case_title": "PO-2025-99001",
+                    "source_case_evidence_count_total": case_evidence_count,
+                    "source_case_evidence_count_to_download": case_evidence_count,
+                    "source_case_evidence_count_downloaded": 0
+                }
             }
             logger.log_error(event=Constants.PROCESS_NAME, error=Exception(json.dumps(log_data)))
-            
-
-            update_job_status(
+            lambda_update_job_status(
                 job_id=job_id,
-                status_code=StatusCodes.NO_NEW_EVIDENCE_FOUND.value,
-                job_msg="No new evidence files found",
-                last_modified_process=Constants.PROCESS_NAME
+                status_value="INVALID-CASE",
+                msg="No new evidence files found"
+                
             )
-        
-        return return_values
-        
+            return []
+
+        return evidence_list
+
     except requests.exceptions.RequestException as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
-        
         raise Exception(f"Axon API error: {str(e)}")
     except Exception as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
-        
         raise
 
 
@@ -432,11 +420,11 @@ def persist_and_queue(
                     'environment': env_stage
                 })
             )
-            update_job_status(
+            lambda_update_job_status(
                 job_id=job_id,
-                status_code=StatusCodes.VALID_CASE.value,
-                job_msg="No new evidence files found",
-                last_modified_process=PROCESS_NAME
+                status_value="VALID-CASE",
+                msg="No new evidence files found"
+               
             )
             return {
                 'statusCode': 200,
@@ -463,11 +451,11 @@ def persist_and_queue(
         )
 
         # Step 3: Update job status
-        update_job_status(
+        lambda_update_job_status(
             job_id=job_id,
-            status_code=StatusCodes.DOWNLOAD_READY.value,
-            job_msg=f"Queued {len(files_to_create)} files for download",
-            last_modified_process=PROCESS_NAME
+            status_value="DOWNLOAD-READY",
+            msg=f"Queued {len(files_to_create)} files for download"
+            
         )
 
         logger.log_success( event=Constants.PROCESS_NAME,message= json.dumps({
@@ -513,7 +501,7 @@ def persist_and_queue(
             'statusCode': 500,
             'body': json.dumps({'error': f'Processing failed: {str(e)}'})
         }
-def process_case_evidence_with_sqs(job_id: str, source_case_id: str, context_data:None):
+def process_case_evidence_with_sqs(job_id: str, source_case_id: str,  context_data:None):
     config = get_lambda_config(context_data=context_data)
     evidence_list = retrieve_case_evidence(source_case_id, job_id, config, context_data)
     files_to_create, normal_sqs_messages, oversize_sqs_messages = process_evidence_records(
@@ -526,7 +514,7 @@ def process_case_evidence_with_sqs(job_id: str, source_case_id: str, context_dat
 def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, str], context_data:None) -> List[Dict]:
     """Fetch evidence list from Axon API."""
     logger.log_success(event="retrieve case evidence", message="calling retrieve case evidence")
-    evidence_list = get_case_evidence_from_api(source_case_id, job_id, config, context_data=context_data)
+    evidence_list = get_case_evidence_from_api(source_case_id, job_id,  config, context_data=context_data)
     logger.log_success(event=Constants.PROCESS_NAME, message=json.dumps({
             'message': 'Retrieved evidence list',
             'source_case_id': source_case_id,
@@ -534,6 +522,38 @@ def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, 
         }), job_id=job_id
     )
     return evidence_list
+
+def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> Dict:
+    """Get evidence details from Axon API using configuration from SSM."""
+    import requests
+    
+    try:
+        headers = {
+            'Authorization': f'Bearer {config["axon_bearer_token"]}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Build the API URL
+        api_url =  config['axon_base_url'] + '/api/v2/agencies/' + config['axon_agency_id'] + '/evidence/' + evidence_id 
+        
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
+        
+        response = requests.get(api_url, headers=headers, params={"evidence_id": + evidence_id}, timeout=30,verify=True)
+        response.raise_for_status()
+        
+        evidence_details = response.json()
+        
+        logger.log_success(event=Constants.PROCESS_NAME,message=f"Retrieved evidence details for {evidence_id}")
+        
+        return evidence_details
+        
+    except requests.exceptions.RequestException as e:
+        logger.log_error(event=Constants.PROCESS_NAME,error= e)
+        raise Exception(f"Axon Evidence Details API error: {str(e)}")
+    except Exception as e:
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
+        raise
+
 
 def process_evidence_records(
     evidence_list: List[Dict], job_id: str, source_case_id: str, config: Dict[str, str]
@@ -636,278 +656,63 @@ def handle_error_and_queue(
     raise exception
 
 
-def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> Dict:
-    """Get evidence details from Axon API using configuration from SSM."""
-    import requests
-    
-    try:
-        headers = {
-            'Authorization': f'Bearer {config["axon_bearer_token"]}',
-            'Content-Type': 'application/json'
-        }
-        
-        # Build the API URL
-        api_url =  config['axon_base_url'] + '/api/v2/agencies/' + config['axon_agency_id'] + '/evidence/' + evidence_id 
-        #api_url = config['axon_get_evidence_details_url']
-        
-        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
-        
-        response = requests.get(api_url, headers=headers, params={"evidence_id:" + evidence_id}, timeout=30,verify=True)
-        response.raise_for_status()
-        
-        evidence_details = response.json()
-        
-        logger.log_success(event=Constants.PROCESS_NAME,message=f"Retrieved evidence details for {evidence_id}")
-        
-        return evidence_details
-        
-    except requests.exceptions.RequestException as e:
-        logger.log_error(event=Constants.PROCESS_NAME,error= e)
-        raise Exception(f"Axon Evidence Details API error: {str(e)}")
-    except Exception as e:
-        logger.log_error(event=Constants.PROCESS_NAME, error=e)
-        raise
-# Get Axon bearer token
-def get_axon_bearer(config: Dict[str, str],  job_id:str, event,context_data=None):
-       # Add API method
-        
-        api_url =  config['axon_base_url']  + config['axon_auth_url']
-        logger.log_success(
-                event="api_call",
-                message="Bearer token retrieval attempt url : " + api_url,
-                job_id=job_id)
-                
-        #https://bcps-dev.ca.evidence.com/api/oauth2/token
-        # Get API bearer token
-        try:
-            payload = {
-            "client_id": config['axon_client_id'],
-            "grant_type": "client_credentials",
-            "client_secret": config['axon_client_secret']
-            }
-            # Convert payload to URL-encoded format
-           # encoded_payload = requests.parse.urlencode(payload).encode('utf-8')
-            
-            response = requests.post(
-               
-                url=api_url,
-                data=payload,
-                timeout=30,  # 30 second timeout
-                headers={'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'}
-            )
-            
-             # Calculate response time in milliseconds
-            response_time_ms = response.elapsed.total_seconds() * 1000
-
-            # Log the API call
-            logger.log_api_call(
-            event=Constants.PROCESS_NAME,
-            url=api_url,
-            method="POST",
-            status_code=response.status_code,
-            response_time=response_time_ms
-            )
-
-            # Log the response status
-            logger.log(
-            event=event,
-            level=LogLevel.INFO,
-            status=LogStatus.SUCCESS,
-            message="log_token_authentication",
-            context_data={
-               
-                "status_code": response.status_code,
-                "response_time_ms": response_time_ms,
-                "operation": "token_retrieval_response_received",
-            },
-            )
-            logger.log_success(
-                event="api_call",
-                message="Bearer token retrieval success",
-                job_id=job_id,
-                custom_metadata={"status_code": response.status, "url": api_url}
-            )
-             # Check if the request was successful
-            if response.status_code == 200:
-                token_data = response.json()
-                access_token = token_data.get("access_token")
-            
-                if not access_token:
-                    logger.log(
-                    event=event,
-                    level=LogLevel.ERROR,
-                    status=LogStatus.FAILURE,
-                    message="log_token_authentication",
-                    context_data={
-                        
-                        "response_keys": list(token_data.keys()),
-                        "operation": "token_retrieval_missing_token",
-                    },
-                    )
-                    raise ValueError("Access token not found in response")
-
-                # Log successful token retrieval (without exposing the token)
-                logger.log(
-                    event=event,
-                    level=LogLevel.INFO,
-                    status=LogStatus.SUCCESS,
-                    message="log_token_authentication",
-                    context_data={
-                   
-                    "token_type": token_data.get("token_type", "unknown"),
-                    "expires_in": token_data.get("expires_in"),
-                    "has_refresh_token": "refresh_token" in token_data,
-                    "operation": "token_retrieval_success",
-                },
-                )
-                #data = json.loads(response.text)  # Decode response properly
-                config['axon_bearer_token'] = access_token
-            else:
-                # Handle HTTP errors
-                error_detail = "Unknown error"
-                try:
-                    error_response = response.json()
-                    error_detail = error_response.get("error_description", 
-                              error_response.get("error", "Unknown error"))
-                except:
-                    error_detail = response.text[:200]  # First 200 chars of response
-
-                logger.log(
-                    event=event,
-                    level=LogLevel.ERROR,
-                    status=LogStatus.FAILURE,
-                    message="log_token_authentication",
-                    context_data={
-                      
-                    "status_code": response.status_code,
-                    "error_detail": error_detail,
-                    "operation": "token_retrieval_http_error",
-                },
-                )
-
-        #     raise Exception(f"Token request failed with status {response.status_code}: {error_detail}")  
-        # except requests.exceptions.Timeout:
-        # # Log API call for timeout
-        #     logger.log_api_call(
-        #     event=event,
-        #     url=api_url,
-        #     method="POST",
-        #     status_code=0,
-        #     response_time=30000,  # timeout duration in ms
-        #     error="timeout",
-        #     # **context_data
-        #     )
-        
-        #     logger.log(
-        #     event=event,
-        #     level=LogLevel.ERROR,
-        #     status=LogStatus.FAILURE,
-        #     message="log_token_authentication",
-        #     context_data={
-        #         **context_data,
-        #         "error": "Request timeout",
-        #         "operation": "token_retrieval_timeout",
-        #     },
-        #     )
-    
-        # except requests.exceptions.ConnectionError:
-        # # Log API call for connection error
-        #     logger.log_api_call(
-        #     event=event,
-        #     url=api_url,
-        #     method="POST",
-        #     status_code=0,
-        #     response_time=0,
-        #     error="connection_error",
-        #      **context_data
-        #     )
-        
-        #     logger.log(
-        #     event=event,
-        #     level=LogLevel.ERROR,
-        #     status=LogStatus.FAILURE,
-        #     message="log_token_authentication",
-        #     context_data={
-        #         **context_data,
-        #         "error": "Connection error",
-        #         "operation": "token_retrieval_connection_error",
-        #     },
-        #     )
-        except Exception as e :
-               logger.log(
-            event=event,
-            level=LogLevel.ERROR,
-            status=LogStatus.FAILURE,
-            message="bearer retrieval error",
-            context_data={
-               
-                "parameter_name": "bearer token",
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "response_time_ms": response_time_ms,
-                "operation": "token_retrieval_unexpected_error",
-            },
-        )
-
-        raise Exception("Failed to connect to authentication server")
-
-        
 
      
 # Lambda handler
-def lambda_handler(event, context):
-    """Main Lambda handler for evidence processing."""
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
-        """Main Lambda handler function."""
-       # Log environment information
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
         logger.log_start(event="Case Detail and Evidence Filter Start", job_id=context.aws_request_id)
-
-         # Base context data for all log entries
         base_context = {
-        "request_id": context.aws_request_id,
-        "function_name": context.function_name,
-        "env_stage": env_stage,
+            "request_id": context.aws_request_id,
+            "function_name": context.function_name,
+            "env_stage": env_stage,
         }
-        # Extract job_id and source_case_id from event (matches your trigger)
+        
+        # Init db manager
+        initialize_db_manager()
+        
+        if not event.get("Records"):
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No records found in event"))
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'No records found in event'})
+            }
+
         for record in event["Records"]:
             message_attributes = record.get('messageAttributes', {})
-             # Retrieve job_id
+            job_id = None
+            source_case_id = None
+
             if 'job_id' in message_attributes:
                 attr = message_attributes['job_id']
                 job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
-            
-            # Retrieve source_case_id
             if 'source_case_id' in message_attributes:
                 attr = message_attributes['source_case_id']
                 source_case_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
 
-        
-        if not job_id or not source_case_id:
-            logger.log_error(event=Constants.PROCESS_NAME,error=Exception("'job_id and source_case_id are required"),job_id=context.aws_request_id)
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'job_id and source_case_id are required',
-                    'received_event': event
-                })
-            }
-        
-        
-        logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
-        
-       
-        results  = process_case_evidence_with_sqs(job_id, source_case_id, context_data=base_context)
-        results_json = json.loads(results)
+            if not job_id or not source_case_id:
+                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id and source_case_id are required"))
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({
+                        'error': 'job_id and source_case_id are required',
+                        'received_event': event
+                    })
+                }
+
+            logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
+            results = process_case_evidence_with_sqs(job_id, source_case_id, context_data=base_context)
 
         logger.log_success(
             event="Case Detail Evidence Filter End",
             message="Successfully completed AxonCaseDetailEvidenceFilter execution",
             job_id=context.aws_request_id
-         )
+        )
+        return results
+
     except Exception as e:
-        logger.log_error(event=Constants.PROCESS_NAME,error=Exception("'job_id and source_case_id are required"),job_id=context.aws_request_id)
-        
+        logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Lambda execution failed: {str(e)}"))
         return {
             'statusCode': 500,
             'body': json.dumps({'error': f'Lambda execution failed: {str(e)}'})
