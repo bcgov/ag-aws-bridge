@@ -98,6 +98,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "source_agency": f"{source_agency}",
             },
         )
+        if source_agency is None:
+            raise ValueError(f"Invalid Source Agency: {source_agency}")
+
 
         # Construct url
         base_url = ssm_parameters["base_url"]
@@ -130,8 +133,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if is_valid:
             print("Checksum verified - proceeding with processing")
         else:
-            queue_url = ssm_parameters['evidence_download_queue_url']
-            requeue_success = requeue_message_on_checksum_failure(record, queue_url)
+            requeue_message(record, ssm_parameters)
 
             return {
                 "statusCode": 400,
@@ -181,6 +183,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
 
     except Exception as e:
+        requeue_message(record, ssm_parameters)
         logger.log(
             event=event,
             level=LogLevel.ERROR,
@@ -195,6 +198,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         return {"statusCode": 500, "error": f"Failed to process message {message_id}"}
+
+def requeue_message(record, ssm_parameters):
+    queue_url = ssm_parameters['evidence_download_queue_url']
+    requeue_success = requeue_message_on_checksum_failure(record, queue_url)
 
 
 def get_ssm_parameters(
