@@ -637,6 +637,34 @@ class DatabaseManager:
             return result[0]['source_agency']
         return None
 
+    def get_source_case_information(self, job_id: str) -> Dict[str, Any] | None:
+        """
+        Get source_agency (guid value) for a specific evidence and job 
+        when evidence_transfer_state_code is 30 (DOWNLOAD-READY).
+        
+        Args:
+            evidence_id: The evidence ID to look up
+            job_id: The job ID to look up
+            
+        Returns:
+            str | None: The source_agency GUID value, or None if not found or state is not 30
+        """
+        query = """
+            SELECT j.source_case_title,
+                j.source_case_id 
+            FROM evidence_transfer_jobs j
+            WHERE j.job_id = %s
+        """
+        
+        result = self.execute_query(query, (job_id,))
+        
+        if result and len(result) > 0:
+            return {
+                "source_case_title": result[0]['source_case_title'],
+                "source_case_id": result[0]['source_case_id'],
+            }
+        return None
+
     def verify_file_checksum(self, evidence_file_id: str, calculated_checksum: str) -> bool:
         """
         Verify if calculated checksum matches the database stored checksum.

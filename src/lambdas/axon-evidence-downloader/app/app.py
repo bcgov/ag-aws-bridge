@@ -1,3 +1,4 @@
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -140,6 +141,33 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "message": f"Checksum not verified - terminating processing",
             }
 
+        # Transfer file to s3
+        # Get source case information
+        case_info = db_manager.get_source_case_information(job_id)
+        if not case_info:
+            raise ValueError(f"Invalid Case Information: {case_info}")
+        source_case_title = case_info.get('source_case_title', 'unknown_case')
+        source_case_id = case_info.get('source_case_id', 'unknown_id')
+        
+        transfer_result = transfer_file_to_s3(
+            file_path, job_id, evidence_file_id, ssm_parameters, case_info
+        )
+
+        if transfer_result['success']:
+            logger.log(
+                event=event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
+                message="axon Case Evidence Downloaded to Intermediary S3 Location",
+                context_data={
+                    "job_id": job_id,
+                    "source_case_title": source_case_title,
+                    "source_case_id": source_case_id
+                },
+            )
+        else:
+            raise SystemError("file transfer to s3 failed")
+        
         # Update Tracking Database - evidence_file
         evidence_file_update_success = db_manager.update_evidence_file_downloaded(evidence_file_id)
 
@@ -227,6 +255,8 @@ def get_ssm_parameters(
         "bearer": f"/{env_stage}/axon/api/bearer",
         "base_url": f"/{env_stage}/axon/api/base_url",
         "evidence_download_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download",
+        "s3_bucket": f"/{env_stage}/edt/s3/bucket",
+        "s3_role": f"/{env_stage}/edt/s3/iam/role_arn",
     }
 
     parameters = {}
@@ -504,3 +534,72 @@ def requeue_message_on_checksum_failure(original_record: dict, queue_url: str) -
     except Exception as e:
         print(f"Error requeuing message to SQS: {str(e)}")
         return False
+
+
+def transfer_file_to_s3(local_file_path: str, job_id: str, evidence_file_id: str, ssm_parameters: dict, case_info: Dict[str, Any]) -> dict:
+    """
+    Transfer evidence file to target S3 bucket.
+    
+    Args:
+        local_file_path: Path to the local file in /tmp
+        job_id: The job ID
+        evidence_file_id: The evidence file ID (used as filename)
+        ssm_parameters: Dictionary containing S3 configuration
+        case_info: Dictionary containing source_case_title and source_case_id
+    Returns:
+        dict: Transfer result with success status and details
+    """
+    result = {
+        'success': False,
+        'job_id': job_id,
+        'evidence_file_id': evidence_file_id,
+        'local_file_path': local_file_path,
+        's3_location': None,
+        'error': None
+    }
+    
+    try:
+        # 1. Get S3 bucket from SSM parameters
+        s3_bucket = ssm_parameters.get('s3_bucket')
+        
+        if not s3_bucket:
+            result['error'] = 'S3 bucket not found in SSM parameters'
+            return result
+        
+        if not case_info:
+            result['error'] = f'Could not retrieve case information for job_id: {job_id}'
+            return result
+        
+        source_case_title = case_info.get('source_case_title', 'unknown_case')
+        source_case_id = case_info.get('source_case_id', 'unknown_id')
+        
+        # 2. Create S3 folder structure and key
+        folder_name = f"{source_case_title}_{job_id}"
+        s3_key = f"{folder_name}/{evidence_file_id}"
+        
+        result['s3_location'] = f"s3://{s3_bucket}/{s3_key}"
+        
+        # 3. Upload to S3
+        s3_client = boto3.client('s3', region_name='ca-central-1')
+        
+        print(f"Uploading {local_file_path} to {result['s3_location']}")
+        s3_client.upload_file(local_file_path, s3_bucket, s3_key)
+        
+        # 4. Verify upload
+        s3_client.head_object(Bucket=s3_bucket, Key=s3_key)
+        print(f"Successfully verified file exists in S3: {result['s3_location']}")
+                
+        # 5. Delete local file
+        if os.path.exists(local_file_path):
+            os.remove(local_file_path)
+            print(f"Successfully deleted local file: {local_file_path}")
+        
+        result['success'] = True
+        result['case_info'] = case_info
+        return result
+        
+    except Exception as e:
+        error_msg = f"Error transferring file to S3: {str(e)}"
+        result['error'] = error_msg
+        print(error_msg)
+        return result
