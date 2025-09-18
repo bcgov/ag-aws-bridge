@@ -447,12 +447,14 @@ def persist_and_queue(
         if not database_success:
             raise Exception("Database operations failed")
 
+        oversize_file_sqs_queue_name = config['transfer_exception_queue_url'] #used to be config['oversize_download_queue_url'] change after phase 1
+
         # Step 2: Send SQS messages after successful database operations
         sqs_results = send_batch_sqs_messages(
             normal_sqs_messages,
             oversize_sqs_messages,
             config['normal_download_queue_url'],
-            config['oversize_download_queue_url']
+            oversize_file_sqs_queue_name
         )
 
         # Step 3: Update job status
