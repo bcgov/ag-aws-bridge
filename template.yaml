@@ -38,6 +38,17 @@ Resources:
         - python3.13
       RetentionPolicy: Retain
 
+  # DB layer
+  BridgeTrackingDbLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: bridge-tracking-db-layer
+      ContentUri: src/layers/bridge_tracking_db_layer/
+      CompatibleRuntimes:
+        - python3.11
+        # - python3.13
+      RetentionPolicy: Retain
+
   AxonAuthenticatorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -81,6 +92,41 @@ Resources:
   #       - Key: Purpose
   #         Value: "Token refresh failure handling"
 
+  AxonEvidenceDownloaderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/lambdas/axon-evidence-downloader/app
+      Handler: app.lambda_handler
+      Runtime: python3.11
+      EphemeralStorage:
+        Size: 10240
+      Architectures:
+        - x86_64
+      Timeout: 300
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-evidence-download.fifo
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+      Layers:
+        - !Ref LambdaStructuredLoggerLayer
+        - !Ref BridgeTrackingDbLayer
+      Environment:
+        Variables:
+          ENV_STAGE: !Ref Environment
+      Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-downloader-role"
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-048a4f967f32fc802
+          - sg-0f18545644fd98e9a
+          - sg-0143abb3cd912ef17
+          - sg-0e95635bffdfa0c34
+        SubnetIds:  # todo: use only the subnets needed
+          - subnet-0e84012379d304b04
+          - subnet-072de875489645b47
+
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
     Properties:
@@ -110,6 +156,12 @@ Outputs:
     Value: !GetAtt AxonAuthenticatorFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-AxonAuthenticatorFunction"
+
+  AxonEvidenceDownloaderFunction:
+    Description: File Downloader Lambda Function ARN
+    Value: !GetAtt AxonEvidenceDownloaderFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AxonEvidenceDownloaderFunction"
 
   ScheduleExpression:
     Description: Schedule expression for token refresh

@@ -484,6 +484,16 @@ class DatabaseManager:
         return self.execute_query_one(query, (is_imported, dems_imported_id, error_msg, 
                                             last_modified_process, evidence_id), True)
     
+    # this is just a testing method, safe to remove after release
+    def get_sample_evidence_files(self, limit: int = 5) -> List[Dict]:
+        """Get sample evidence files for testing."""
+        query = """
+            SELECT evidence_id, job_id, evidence_file_id
+            FROM evidence_files 
+            LIMIT %s
+        """
+        return self.execute_query(query, (limit,))
+
     def get_evidence_file(self, evidence_id: str) -> Optional[Dict]:
         """Get an evidence file by ID."""
         query = "SELECT * FROM evidence_files WHERE evidence_id = %s"
@@ -598,6 +608,242 @@ class DatabaseManager:
             LIMIT %s
         """
         return self.execute_query(query, (limit,))
+    
+    def get_source_agency_for_evidence(self, evidence_id: str, job_id: str) -> str | None:
+        """
+        Get source_agency (guid value) for a specific evidence and job 
+        when evidence_transfer_state_code is 30 (DOWNLOAD-READY).
+        
+        Args:
+            evidence_id: The evidence ID to look up
+            job_id: The job ID to look up
+            
+        Returns:
+            str | None: The source_agency GUID value, or None if not found or state is not 30
+        """
+        query = """
+            SELECT j.source_agency 
+            FROM evidence_files ef
+            JOIN evidence_transfer_jobs j ON ef.job_id = j.job_id
+            WHERE ef.evidence_id = %s 
+            AND ef.job_id = %s
+            AND ef.evidence_transfer_state_code = 30
+        """
+        
+        result = self.execute_query(query, (evidence_id, job_id))
+        
+        if result and len(result) > 0:
+            return result[0]['source_agency']
+        return None
+
+    def get_source_case_information(self, job_id: str) -> Dict[str, Any] | None:
+        """
+        Get source_agency (guid value) for a specific evidence and job 
+        when evidence_transfer_state_code is 30 (DOWNLOAD-READY).
+        
+        Args:
+            evidence_id: The evidence ID to look up
+            job_id: The job ID to look up
+            
+        Returns:
+            str | None: The source_agency GUID value, or None if not found or state is not 30
+        """
+        query = """
+            SELECT j.source_case_title,
+                j.source_case_id 
+            FROM evidence_transfer_jobs j
+            WHERE j.job_id = %s
+        """
+        
+        result = self.execute_query(query, (job_id,))
+        
+        if result and len(result) > 0:
+            return {
+                "source_case_title": result[0]['source_case_title'],
+                "source_case_id": result[0]['source_case_id'],
+            }
+        return None
+
+    def verify_file_checksum(self, evidence_file_id: str, calculated_checksum: str) -> bool:
+        """
+        Verify if calculated checksum matches the database stored checksum.
+        
+        Args:
+            evidence_file_id: The evidence file ID to look up
+            calculated_checksum: The checksum calculated from downloaded file
+            
+        Returns:
+            bool: True if checksums match (count = 1), False otherwise
+        """
+        query = """
+            SELECT COUNT(*) as match_count
+            FROM evidence_files 
+            WHERE evidence_file_id = %s 
+            AND LOWER(checksum) = LOWER(%s)
+        """
+        
+        try:
+            result = self.execute_query(query, (evidence_file_id, calculated_checksum))
+            
+            if result and len(result) > 0:
+                match_count = result[0]['match_count']
+                
+                if match_count == 1:
+                    print(f"Checksum verification PASSED for evidence_file_id {evidence_file_id}")
+                    return True
+                else:
+                    print(f"Checksum verification FAILED for evidence_file_id {evidence_file_id}")
+                    print(f"Match count: {match_count} (expected: 1)")
+                    return False
+            else:
+                print(f"No result returned from checksum verification query")
+                return False
+                
+        except Exception as e:
+            print(f"Error verifying checksum for evidence_file_id {evidence_file_id}: {str(e)}")
+            return False
+
+    def update_evidence_file_downloaded(self, evidence_file_id: str) -> bool:
+        """
+        Update evidence_file record to mark as downloaded.
+        
+        Args:
+            evidence_file_id: The evidence file ID to update
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        current_utc = datetime.utcnow()
+        
+        query = """
+            UPDATE evidence_files 
+            SET 
+                axon_is_downloaded = true,
+                evidence_transfer_state_code = 45,
+                axon_download_utc = %s,
+                last_modified_process = %s,
+                last_modified_utc = %s
+            WHERE evidence_file_id = %s
+            RETURNING evidence_file_id
+        """
+        
+        try:
+            params = (
+                current_utc,
+                'lambda: axon evidence downloader',
+                current_utc,
+                evidence_file_id
+            )
+            
+            result = self.execute_query_one(query, params, True)
+            
+            if result:
+                print(f"Successfully updated evidence_file record for evidence_file_id: {evidence_file_id}")
+                return True
+            else:
+                print(f"No record found to update for evidence_file_id: {evidence_file_id}")
+                return False
+            
+        except Exception as e:
+            print(f"Error updating evidence_file record for evidence_file_id {evidence_file_id}: {str(e)}")
+            return False
+
+    def increment_job_download_count(self, job_id: str) -> bool:
+        """
+        Increment the source_case_evidence_count_downloaded for a job.
+        
+        Args:
+            job_id: The job ID to update
+            
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        query = """
+            UPDATE evidence_transfer_jobs 
+            SET source_case_evidence_count_downloaded = source_case_evidence_count_downloaded + 1,
+                last_modified_utc = %s
+            WHERE job_id = %s
+            RETURNING job_id, source_case_evidence_count_downloaded
+        """
+        
+        try:
+            current_utc = datetime.utcnow()
+            params = (current_utc, job_id)
+            
+            result = self.execute_query_one(query, params, True)
+            
+            if result:
+                print(f"Successfully incremented download count for job_id: {job_id}")
+                print(f"New download count: {result['source_case_evidence_count_downloaded']}")
+                return True
+            else:
+                print(f"No job record found for job_id: {job_id}")
+                return False
+            
+        except Exception as e:
+            print(f"Error incrementing download count for job_id {job_id}: {str(e)}")
+            return False
+
+
+    def evaluate_job_completion_status(self, job_id: str) -> dict:
+        """
+        Evaluate if all evidence files for a job have been downloaded.
+        
+        Args:
+            job_id: The job ID to evaluate
+            
+        Returns:
+            dict: Completion status and counts
+        """
+        try:
+            # 1. Query evidence_transfer_jobs for counts and status
+            job_query = """
+                SELECT source_case_evidence_count_to_download,
+                    source_case_evidence_count_downloaded
+                FROM evidence_transfer_jobs 
+                WHERE job_id = %s
+            """
+            
+            job_result = self.execute_query_one(job_query, (job_id,))
+            if not job_result:
+                return {'error': f'Job not found: {job_id}'}
+            
+            # 2. Query evidence_files table for actual downloaded count
+            files_query = """
+                SELECT COUNT(*) as actual_downloaded_count
+                FROM evidence_files 
+                WHERE job_id = %s AND axon_is_downloaded = true
+            """
+            
+            files_result = self.execute_query_one(files_query, (job_id,))
+            actual_downloaded = files_result['actual_downloaded_count'] if files_result else 0
+            
+            # Extract values
+            count_to_download = job_result['source_case_evidence_count_to_download'] or 0
+            count_downloaded_tracked = job_result['source_case_evidence_count_downloaded'] or 0
+            
+            result = {
+                'job_id': job_id,
+                'count_to_download': count_to_download,
+                'count_downloaded_tracked': count_downloaded_tracked,
+                'actual_downloaded_count': actual_downloaded,
+                'all_counts_match': False,
+            }
+            
+            # 3. Evaluate if all counts match (all files downloaded)
+            all_counts_match = (
+                actual_downloaded == count_to_download and
+                actual_downloaded == count_downloaded_tracked and
+                count_to_download > 0  # Ensure we have files to download
+            )
+            result['all_counts_match'] = all_counts_match
+
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error evaluating job completion for job_id {job_id}: {str(e)}"
+            print(error_msg)
+            return {'error': error_msg}
 
     # Utility methods
     def health_check(self) -> Dict[str, Any]:
