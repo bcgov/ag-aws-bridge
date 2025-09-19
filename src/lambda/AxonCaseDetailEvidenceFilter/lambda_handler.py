@@ -3,6 +3,7 @@ import json
 import boto3
 import time
 import os
+import requests
 from typing import List, Dict, Any, Optional, Tuple
 import botocore.exceptions
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
@@ -14,12 +15,6 @@ from bridge_tracking_db_layer import (
     get_evidence_transfer_job, update_job_status, StatusCodes,
     
 )
-
-class StatusCodes(Enum):
-    DOWNLOAD_READY = "DOWNLOAD_READY"
-    DOWNLOAD_READY_OVERSIZE = "DOWNLOAD_READY_OVERSIZE"
-    VALID_CASE = "VALID_CASE"
-    NO_NEW_EVIDENCE_FOUND = "NO-NEW-EVIDENCE-FOUND"
     
 class Constants:
     PROCESS_NAME = "axon-case-detail-and-evidence-filter"
@@ -27,17 +22,19 @@ class Constants:
     SQS_BATCH_SIZE = 10
 
 logger = LambdaStructuredLogger()
-
+db_manager = None
 
 # Global configuration cache
 _lambda_config = None
 
-def get_lambda_config(ssm=None) -> Dict[str, str]:
+def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
     """Get Lambda-specific configuration from SSM Parameter Store."""
     global _lambda_config
     
     if _lambda_config is not None:
         return _lambda_config
+    
+    start_time = time.time()
     
     try:
         if ssm is None:
@@ -51,6 +48,10 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
         parameter_paths = {
             'axon_bearer_token': f'/{env_stage}/axon/api/bearer',
             'axon_agency_id': f'/{env_stage}/axon/api/agency_id',
+            'axon_base_url': f'/{env_stage}/axon/api/base_url',
+            'axon_client_id': f'/{env_stage}/axon/api/client_id',
+            'axon_client_secret': f'/{env_stage}/axon/api/client_secret',
+            'axon_auth_url': f'/{env_stage}/axon/api/authentication_url',
             'axon_get_case_details_url': f'/{env_stage}/axon/api/get_case_details_url',
             'axon_get_evidence_details_url': f'/{env_stage}/axon/api/get_evidence_details_url',
             'normal_download_queue_url': f'/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download',
@@ -59,28 +60,47 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
         }
         
         parameter_names = list(parameter_paths.values())
+        max_parameters_per_request = 10  # AWS SSM limit
         
-        # Get all parameters in a single call for efficiency
-        response = ssm.get_parameters(
-            Names=parameter_names,
-            WithDecryption=True  # Decrypt SecureString parameters (bearer token)
-        )
+        # Split parameter names into chunks of 10 or fewer
+        parameter_chunks = [parameter_names[i:i + max_parameters_per_request] 
+                           for i in range(0, len(parameter_names), max_parameters_per_request)]
         
+        config = {}
+        all_parameters = []
+        missing_params = []
+        
+        # Fetch parameters in chunks
+        for chunk in parameter_chunks:
+            response = ssm.get_parameters(
+                Names=chunk,
+                WithDecryption=True
+            )
+            all_parameters.extend(response['Parameters'])
+        # Calculate response time
+        response_time_ms = (time.time() - start_time) * 1000
         # Check if any parameters were not found
-        if len(response['Parameters']) != len(parameter_names):
-            missing_params = set(parameter_names) - {p['Name'] for p in response['Parameters']}
+        if len(all_parameters) != len(parameter_names):
+            missing_params = set(parameter_names) - {p['Name'] for p in all_parameters}
             raise ValueError(f"Missing SSM parameters: {missing_params}")
         
         # Build configuration dictionary
-        config = {}
-        for param in response['Parameters']:
+        for param in all_parameters:
             for key, path in parameter_paths.items():
                 if param['Name'] == path:
                     config[key] = param['Value']
                     break
-        
+          # Log retrieval status
+        logger.log_ssm_parameter_collection(
+            parameter_names=list(config.keys()),
+            parameters_collected=config,
+            response_time_ms=response_time_ms,
+            invalid_parameters=missing_params if missing_params else None,
+            **context_data
+        )
+
         _lambda_config = config
-        logger.log_success( event=Constants.PROCESS_NAME,message=f"Lambda configuration loaded from SSM for environment: {env_stage}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Lambda configuration loaded from SSM for environment: {env_stage}")
         
         return _lambda_config
         
@@ -88,180 +108,14 @@ def get_lambda_config(ssm=None) -> Dict[str, str]:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
         raise
 
-# def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
-#     """
-#     Complete example: Process case evidence and send SQS batch messages.
-#     Handles both normal and oversize files.
-#     """
-#     PROCESS_NAME = "axon-case-detail-and-evidence-filter"
-    
-#     try:
-#         # Get Lambda configuration from SSM
-#         config = get_lambda_config()
-        
-#         normal_queue_url = config['normal_download_queue_url']
-#         oversize_queue_url = config['oversize_download_queue_url']
-#         exception_queue_url = config['transfer_exception_queue_url']
-        
-#         logger.info(f"Using queues - Normal: {normal_queue_url}, Oversize: {oversize_queue_url}")
-        
-#         # Step 1: Get case evidence from API
-#         evidence_list = get_case_evidence_from_api(source_case_id, config)
-#         logger.info(f"Found {len(evidence_list)} evidence records for case {source_case_id}")
-        
-#         # Collections for batch processing
-#         files_to_create = []
-#         normal_sqs_messages = []
-#         oversize_sqs_messages = []
-        
-#         # Step 2: Process each evidence record
-#         for evidence_record in evidence_list:
-#             evidence_id = evidence_record['evidenceId']
-            
-#             # Check if already exists (race condition protection)
-#             existing_file = get_evidence_file(evidence_id)
-#             if existing_file:
-#                 logger.info(f"Evidence {evidence_id} already exists, skipping")
-#                 continue
-            
-#             try:
-#                 # Get detailed evidence metadata
-#                 evidence_details = get_evidence_details_from_api(evidence_id, config)
-#                 file_size_bytes = evidence_details.get('size', 0)
-                
-#                 # Determine processing path based on size
-#                 size_threshold = Constants.SIZE_THRESHOLD_BYTES
-                
-#                 if file_size_bytes < size_threshold:
-#                     state_code = StatusCodes.DOWNLOAD_READY
-#                     queue_type = "normal"
-#                 else:
-#                     state_code = StatusCodes.DOWNLOAD_READY_OVERSIZE
-#                     queue_type = "oversize"
-                
-#                 # Prepare evidence file data
-#                 file_data = {
-#                     'evidence_id': evidence_id,
-#                     'job_id': job_id,
-#                     'evidence_transfer_state_code': state_code,
-#                     'evidence_file_id': evidence_details.get('fileId'),
-#                     'evidence_file_type': evidence_details.get('contentType'),
-#                     'source_case_id': source_case_id,  # Use source_case_id here
-#                     'file_size_bytes': file_size_bytes,
-#                     'checksum': evidence_details.get('checksum'),
-#                     'last_modified_process': PROCESS_NAME
-#                 }
-                
-#                 files_to_create.append(file_data)
-                
-#                 # Prepare SQS message
-#                 sqs_message = create_sqs_message(job_id, evidence_id, source_case_id, evidence_details)
-                
-#                 # Add to appropriate queue collection
-#                 if queue_type == "normal":
-#                     normal_sqs_messages.append(sqs_message)
-#                     logger.info(f"Queued normal file: {evidence_id} ({format_file_size(file_size_bytes)})")
-#                 else:
-#                     oversize_sqs_messages.append(sqs_message)
-#                     logger.info(f"Queued oversize file: {evidence_id} ({format_file_size(file_size_bytes)})")
-                
-#             except Exception as e:
-#                 logger.error(f"Failed to process evidence {evidence_id}: {e}")
-                
-#                 # Send exception to exception queue for manual review
-#                 send_exception_message(exception_queue_url, job_id, evidence_id, source_case_id, str(e))
-#                 continue  # Don't fail entire batch for one file
-        
-#         # Step 3: Atomic database operations
-#         if files_to_create:
-#             try:
-#                 # Create all evidence files in database transaction
-#                 database_success = create_evidence_files_atomic(files_to_create, job_id, PROCESS_NAME)
-                
-#                 if database_success:
-#                     # Step 4: Send SQS messages only after successful database operations
-#                     sqs_results = send_batch_sqs_messages(
-#                         normal_sqs_messages, 
-#                         oversize_sqs_messages,
-#                         normal_queue_url,
-#                         oversize_queue_url
-#                     )
-                    
-#                     # Update job status
-#                     update_job_status(
-#                         job_id=job_id,
-#                         status_code=StatusCodes.DOWNLOAD_READY,
-#                         job_msg=f"Queued {len(files_to_create)} files for download",
-#                         last_modified_process=PROCESS_NAME
-#                     )
-                    
-#                     return {
-#                         'statusCode': 200,
-#                         'body': json.dumps({
-#                             'message': 'Evidence processing completed successfully',
-#                             'job_id': job_id,
-#                             'source_case_id': source_case_id,
-#                             'environment': os.environ.get('ENV_STAGE', 'dev-test'),
-#                             'files_processed': len(files_to_create),
-#                             'normal_files': len(normal_sqs_messages),
-#                             'oversize_files': len(oversize_sqs_messages),
-#                             'sqs_results': sqs_results
-#                         })
-#                     }
-#                 else:
-#                     return {
-#                         'statusCode': 500,
-#                         'body': json.dumps({'error': 'Database operations failed'})
-#                     }
-                    
-#             except Exception as e:
-#                 logger.error(f"Failed to process evidence files: {e}")
-                
-#                 # Send critical error to exception queue
-#                 send_exception_message(exception_queue_url, job_id, None, source_case_id, 
-#                                      f"Critical processing error: {str(e)}")
-                
-#                 return {
-#                     'statusCode': 500,
-#                     'body': json.dumps({'error': f'Processing failed: {str(e)}'})
-#                 }
-#         else:
-#             logger.info(f"No new evidence files to process for job {job_id}")
-            
-#             # Update job status even if no files to process
-#             update_job_status(
-#                 job_id=job_id,
-#                 status_code=StatusCodes.VALID_CASE,
-#                 job_msg="No new evidence files found",
-#                 last_modified_process=PROCESS_NAME
-#             )
-            
-#             return {
-#                 'statusCode': 200,
-#                 'body': json.dumps({
-#                     'message': 'No new evidence files to process',
-#                     'job_id': job_id,
-#                     'source_case_id': source_case_id,
-#                     'environment': os.environ.get('ENV_STAGE', 'dev-test'),
-#                     'files_processed': 0
-#                 })
-#             }
-            
-#     except Exception as e:
-#         logger.error(f"Unexpected error in evidence processing: {e}")
-        
-#         # Try to send exception message if possible
-#         try:
-#             config = get_lambda_config()
-#             send_exception_message(config['transfer_exception_queue_url'], job_id, None, source_case_id, 
-#                                  f"Lambda execution error: {str(e)}")
-#         except:
-#             pass  # Don't let exception handling cause more exceptions
-        
-#         return {
-#             'statusCode': 500,
-#             'body': json.dumps({'error': f'Unexpected error: {str(e)}'})
-#         }
+def initialize_db_manager():
+    """Initialize the global DatabaseManager instance."""
+    global db_manager
+    if db_manager is None:
+        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+        db_manager = get_db_manager(env_param_in=env_stage)
+        db_manager._initialize_pool()
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Initialized DatabaseManager for environment: {env_stage}")
 
 def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: str = None, 
                           source_case_id: str = None, error_message: str = None):
@@ -275,7 +129,9 @@ def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: s
             'source_case_id': source_case_id,
             'error_message': error_message,
             'lambda_function': 'evidence-processor',
-            'timestamp': boto3.Session().region_name  # Will be overridden by SQS
+            'timestamp': time.time()
+
+  # Will be overridden by SQS
         }
         
         sqs.send_message(
@@ -293,8 +149,9 @@ def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: s
 def create_sqs_message(job_id: str, evidence_id: str, source_case_id: str, evidence_details: Dict) -> Dict:
     """Create a properly formatted SQS message for evidence download."""
     evidence_file_id = evidence_details.get('fileId')
+   
     return {
-        'Id': evidence_file_id,  # Must be unique within the batch
+        'Id': source_case_id,  # Must be unique within the batch
         'MessageBody': json.dumps({
             'job_id': job_id,
             'evidence_id': evidence_id
@@ -439,99 +296,91 @@ def format_file_size(size_bytes: int) -> str:
     else:
         return f"{size_bytes} bytes"
 
-def update_job_status(db_manager: DatabaseManager, job_id: str, status_value: str, logger: LambdaStructuredLogger):
+def lambda_update_job_status( job_id: str, status_value: str, msg:str):
     """Update job status in the database."""
-    update_job_status = db_manager.get_status_code_by_value(value=status_value)
-    if update_job_status:
-        status_identifier = str(update_job_status["identifier"])
+    job_status_code = db_manager.get_status_code_by_value(value=status_value)
+    if job_status_code:
+        status_identifier = str(job_status_code["identifier"])
         db_manager.update_job_status(
             job_id=job_id,
             status_code=status_identifier,
-            job_msg="",
-            last_modified_process="lambda: rcc and dems case validator"
+            job_msg=msg,
+            last_modified_process="lambda: case detail filter"
         )
 # API functions using configuration from SSM
-def get_case_evidence_from_api(source_case_id: str, job_id : str, config: Dict[str, str]) -> List[Dict]:
+def get_case_evidence_from_api(source_case_id: str, job_id: str, config: Dict[str, str], context_data: Dict[str, Any]) -> List[Dict]:
     """Get case evidence from Axon API using configuration from SSM."""
-    import requests
-    
+    return_values = []
     try:
+        if not config or not config.get("axon_bearer_token"):
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("Configuration or bearer token missing"))
+            return return_values
+
         headers = {
             'Authorization': f'Bearer {config["axon_bearer_token"]}',
             'Content-Type': 'application/json'
         }
-        
-        # Build the API URL with agency_id and case_id
-        api_url =  config['axon_get_case_details_url'] + '/api/v2/agencies/' + config['axon_agency_id'] + '/cases/{source_case_id}/relationships/evidence'
-       
-        # init return List of Dict objects
-        return_values = []
-
-        # # Replace placeholders in URL if needed, or build query parameters
-        # params = {
-        #     'agency_id': config['axon_agency_id'],
-        #     'case_id': source_case_id
-        # }
+        api_url = f"{config['axon_base_url']}api/v2/agencies/{config['axon_agency_id']}/cases/{source_case_id}/relationships/evidence"
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
-      
+
         start_time = time.perf_counter()
-    
-        response_time = time.perf_counter() - start_time
-        response = requests.get(api_url, headers=headers, timeout=30, verify=True)
+        response = requests.get(api_url, headers=headers, timeout=30)
         response.raise_for_status()
-        json_data = json.loads(response.data.decode('utf-8'))
+
+        try:
+            json_data = response.json()
+          
+        except ValueError as e:
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Failed to parse JSON response: {str(e)}"))
+            return return_values
+
+        if not json_data:
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
+            return return_values
+
+        api_meta_data = json_data.get('meta', {})
         
-        #Extract meta data
-        api_meta_data = json_data.get('meta')
         case_evidence_count = int(api_meta_data.get('count'))
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"case_evidence_count: {case_evidence_count}")
+        evidence_list = json_data.get('data', [])
         
-        # Extract evidence list from response
-        # Adjust this based on actual Axon API response structure
-        evidence_list = json_data.get('evidence', [])
-
-        if  case_evidence_count <= 1:
-                logger.log_api()
-                return_values.append(evidence_list)
-                return_values.append("case_evidence_count : " , case_evidence_count)
-                logger.log_api_call(
-                    event="Axon Get Case Evidence call",
-                    url=api_url,
-                    method="GET",
-                    status_code=response.status,
-                    response_time=response_time,
-                    job_id=job_id
-    )
-
-        elif case_evidence_count == 0:
-              # Log the error in structured JSON format
+        response_time = (time.perf_counter() - start_time) * 1000
+        logger.log_api_call(
+            event="Axon Get Case Evidence call",
+            url=api_url,
+            method="GET",
+            status_code=response.status_code,
+            response_time=response_time,
+            job_id=job_id
+        )
+        
+        if case_evidence_count == 0:
+          
             log_data = {
-            'case_metadata' : {
-                "source_case_id": source_case_id,
-                "source_case_title": "PO-2025-99001",
-                "source_case_evidence_count_total": case_evidence_count,
-                "source_case_evidence_count_to_download":case_evidence_count ,
-                "source_case_evidence_count_downloaded": 0
-            }
+                'case_metadata': {
+                    "source_case_id": source_case_id,
+                    "source_case_title": "PO-2025-99001",
+                    "source_case_evidence_count_total": case_evidence_count,
+                    "source_case_evidence_count_to_download": case_evidence_count,
+                    "source_case_evidence_count_downloaded": 0
+                }
             }
             logger.log_error(event=Constants.PROCESS_NAME, error=Exception(json.dumps(log_data)))
-            
-
-            update_job_status(
+            lambda_update_job_status(
                 job_id=job_id,
-                status_code=StatusCodes.NO_NEW_EVIDENCE_FOUND.value,
-                job_msg="No new evidence files found",
-                last_modified_process=Constants.PROCESS_NAME
+                status_value="INVALID-CASE",
+                msg="No new evidence files found"
+                
             )
-        
+            return []
+
         return evidence_list
-        
+
     except requests.exceptions.RequestException as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
-        
         raise Exception(f"Axon API error: {str(e)}")
     except Exception as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=e)
-        
         raise
 
 
@@ -576,11 +425,11 @@ def persist_and_queue(
                     'environment': env_stage
                 })
             )
-            update_job_status(
+            lambda_update_job_status(
                 job_id=job_id,
-                status_code=StatusCodes.VALID_CASE.value,
-                job_msg="No new evidence files found",
-                last_modified_process=PROCESS_NAME
+                status_value="VALID-CASE",
+                msg="No new evidence files found"
+               
             )
             return {
                 'statusCode': 200,
@@ -598,20 +447,22 @@ def persist_and_queue(
         if not database_success:
             raise Exception("Database operations failed")
 
+        oversize_file_sqs_queue_name = config['transfer_exception_queue_url'] #used to be config['oversize_download_queue_url'] change after phase 1
+
         # Step 2: Send SQS messages after successful database operations
         sqs_results = send_batch_sqs_messages(
             normal_sqs_messages,
             oversize_sqs_messages,
             config['normal_download_queue_url'],
-            config['oversize_download_queue_url']
+            oversize_file_sqs_queue_name
         )
 
         # Step 3: Update job status
-        update_job_status(
+        lambda_update_job_status(
             job_id=job_id,
-            status_code=StatusCodes.DOWNLOAD_READY.value,
-            job_msg=f"Queued {len(files_to_create)} files for download",
-            last_modified_process=PROCESS_NAME
+            status_value="DOWNLOAD-READY",
+            msg=f"Queued {len(files_to_create)} files for download"
+            
         )
 
         logger.log_success( event=Constants.PROCESS_NAME,message= json.dumps({
@@ -657,9 +508,9 @@ def persist_and_queue(
             'statusCode': 500,
             'body': json.dumps({'error': f'Processing failed: {str(e)}'})
         }
-def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
-    config = get_lambda_config()
-    evidence_list = retrieve_case_evidence(source_case_id, job_id, config)
+def process_case_evidence_with_sqs(job_id: str, source_case_id: str,  context_data: Dict[str, Any]):
+    config = get_lambda_config(context_data=context_data)
+    evidence_list = retrieve_case_evidence(source_case_id, job_id, config, context_data)
     files_to_create, normal_sqs_messages, oversize_sqs_messages = process_evidence_records(
         evidence_list, job_id, source_case_id, config
     )
@@ -667,9 +518,10 @@ def process_case_evidence_with_sqs(job_id: str, source_case_id: str):
         files_to_create, normal_sqs_messages, oversize_sqs_messages, job_id, source_case_id, config
     )
 
-def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, str]) -> List[Dict]:
+def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, str], context_data: Dict[str, Any]) -> List[Dict]:
     """Fetch evidence list from Axon API."""
-    evidence_list = get_case_evidence_from_api(source_case_id, job_id, config)
+    logger.log_success(event="retrieve case evidence", message="calling retrieve case evidence")
+    evidence_list = get_case_evidence_from_api(source_case_id, job_id,  config, context_data=context_data)
     logger.log_success(event=Constants.PROCESS_NAME, message=json.dumps({
             'message': 'Retrieved evidence list',
             'source_case_id': source_case_id,
@@ -677,6 +529,51 @@ def retrieve_case_evidence(source_case_id: str, job_id : str, config: Dict[str, 
         }), job_id=job_id
     )
     return evidence_list
+
+def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> Dict:
+    """Get evidence details from Axon API using configuration from SSM."""
+    import requests
+    
+    try:
+        headers = {
+            'Authorization': f'Bearer {config["axon_bearer_token"]}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Build the API URL
+        api_url =  config['axon_base_url'] + 'api/v2/agencies/' + config['axon_agency_id'] + '/evidence/' + evidence_id 
+        
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
+        
+        
+        response = requests.get(api_url, headers=headers,  timeout=30,verify=True)
+        response.raise_for_status()
+        
+       # Parse JSON response
+        evidence_details = response.json()
+        if not isinstance(evidence_details, dict):
+            raise ValueError("API response is not a valid JSON object")
+
+        
+        logger.log_success(event=Constants.PROCESS_NAME,message=f"Retrieved evidence details for {evidence_id}")
+        
+        return evidence_details
+        
+    except requests.exceptions.RequestException as e:
+        logger.log_error(event=Constants.PROCESS_NAME,error= e)
+        raise Exception(f"Axon Evidence Details API error: {str(e)}")
+    
+    except ValueError as e:
+        logger.log_error(
+            event=Constants.PROCESS_NAME,
+            error=f"Invalid response for evidence {evidence_id}: {str(e)}",
+            url=api_url
+        )
+        raise
+    except Exception as e:
+        logger.log_error(event=Constants.PROCESS_NAME, error=e)
+        raise
+
 
 def process_evidence_records(
     evidence_list: List[Dict], job_id: str, source_case_id: str, config: Dict[str, str]
@@ -687,9 +584,9 @@ def process_evidence_records(
     oversize_sqs_messages = []
     
     for evidence_record in evidence_list:
-        evidence_id = evidence_record['evidenceId']
+        evidence_id = evidence_record['id']
         if get_evidence_file(evidence_id):
-            logger.debug(f"Skipping existing evidence: {evidence_id}")
+            print(f"Skipping existing evidence: {evidence_id}")
             continue
         try:
             evidence_details = get_evidence_details_from_api(evidence_id, config)
@@ -699,18 +596,37 @@ def process_evidence_records(
                 if file_size_bytes < Constants.SIZE_THRESHOLD_BYTES
                 else StatusCodes.DOWNLOAD_READY_OVERSIZE
             )
-            file_data = {
-                'evidence_id': evidence_id,
-                'job_id': job_id,
-                'evidence_transfer_state_code': state_code.value,
-                'evidence_file_id': evidence_details.get('fileId'),
-                'evidence_file_type': evidence_details.get('contentType'),
-                'source_case_id': source_case_id,
-                'file_size_bytes': file_size_bytes,
-                'checksum': evidence_details.get('checksum'),
-                'last_modified_process': Constants.PROCESS_NAME
-            }
-            files_to_create.append(file_data)
+            files_data = evidence_details.get("data", {}).get("relationships", {}).get("files", {}).get("data", [])
+
+            if not isinstance(files_data, list):
+                
+                logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Files field is not a list for evidence_id {evidence_id}: {files_data}"))
+                continue
+           
+            for file_entry in files_data:
+                 # Extract file attributes
+                file_attributes = file_entry.get("attributes", {})
+                # Validate required file fields
+                file_id = file_entry.get('id')
+                file_size = file_attributes.get('size', 0)
+                if not file_id or not isinstance(file_size, (int, float)):
+                    logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Missing or invalid file id/size for evidence_id {evidence_id}: {file_entry}"))
+                    
+                    continue
+
+                file_data={
+                    'evidence_id': evidence_id,
+                    'job_id': job_id,
+                    'evidence_transfer_state_code': state_code,
+                    'evidence_file_id': file_id,
+                    'evidence_file_type': file_attributes.get('contentType', 'unknown'),
+                    'source_case_id': source_case_id,
+                    'file_size_bytes': file_size,
+                    'checksum': file_attributes.get('checksum'),
+                    'last_modified_process': Constants.PROCESS_NAME
+                    }
+                files_to_create.append(file_data)
+            
             sqs_message = create_sqs_message(job_id, evidence_id, source_case_id, evidence_details)
             (normal_sqs_messages if state_code == StatusCodes.DOWNLOAD_READY else oversize_sqs_messages).append(sqs_message)
         except Exception as e:
@@ -779,89 +695,63 @@ def handle_error_and_queue(
     raise exception
 
 
-def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> Dict:
-    """Get evidence details from Axon API using configuration from SSM."""
-    import requests
-    
-    try:
-        headers = {
-            'Authorization': f'Bearer {config["axon_bearer_token"]}',
-            'Content-Type': 'application/json'
-        }
-        
-        # Build the API URL
-        api_url = config['axon_get_evidence_details_url']
-        
-        # Replace placeholders or build query parameters
-        params = {
-            'agency_id': config['axon_agency_id'],
-            'evidence_id': evidence_id
-        }
-        
-        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
-        
-        response = requests.get(api_url, headers=headers, params=params, timeout=30,verify=True)
-        response.raise_for_status()
-        
-        evidence_details = response.json()
-        
-        logger.log_success(event=Constants.PROCESS_NAME,message=f"Retrieved evidence details for {evidence_id}")
-        
-        return evidence_details
-        
-    except requests.exceptions.RequestException as e:
-        logger.log_error(event=Constants.PROCESS_NAME,error= e)
-        raise Exception(f"Axon Evidence Details API error: {str(e)}")
-    except Exception as e:
-        logger.log_error(event=Constants.PROCESS_NAME, error=e)
-        raise
 
+     
 # Lambda handler
-def lambda_handler(event, context):
-    """Main Lambda handler for evidence processing."""
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
-        """Main Lambda handler function."""
-       
+        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
         logger.log_start(event="Case Detail and Evidence Filter Start", job_id=context.aws_request_id)
-
-        # Extract job_id and source_case_id from event (matches your trigger)
-        job_id = event.get('job_id')
-        source_case_id = event.get('source_case_id')
+        base_context = {
+            "request_id": context.aws_request_id,
+            "function_name": context.function_name,
+            "env_stage": env_stage,
+        }
         
-        if not job_id or not source_case_id:
-            logger.log_error(event=Constants.PROCESS_NAME,error=Exception("'job_id and source_case_id are required"),job_id=context.aws_request_id)
+        # Init db manager
+        initialize_db_manager()
+        
+        if not event.get("Records"):
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No records found in event"))
             return {
                 'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'job_id and source_case_id are required',
-                    'received_event': event
-                })
+                'body': json.dumps({'error': 'No records found in event'})
             }
-        
-        # Log environment information
-        env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-        logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
-        
-        # Process the case evidence
-        #return process_case_evidence_with_sqs(job_id, source_case_id)
-          #'statusCode': 200,
-           #     'body': json.dumps({
-            #        'message': 'No new evidence files to process',
-            #        'job_id': job_id,
-            #        'source_case_id': source_case_id,
-            #        'environment': env_stage,
-            #        'files_processed': 0
-        results  = process_case_evidence_with_sqs(job_id, source_case_id)
-        results_json = json.loads(results)
+
+        for record in event["Records"]:
+            message_attributes = record.get('messageAttributes', {})
+            job_id = None
+            source_case_id = None
+
+            if 'job_id' in message_attributes:
+                attr = message_attributes['job_id']
+                job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
+            if 'source_case_id' in message_attributes:
+                attr = message_attributes['source_case_id']
+                source_case_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
+
+            if not job_id or not source_case_id:
+                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id and source_case_id are required"))
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({
+                        'error': 'job_id and source_case_id are required',
+                        'received_event': event
+                    })
+                }
+
+            logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
+            results = process_case_evidence_with_sqs(job_id, source_case_id, context_data=base_context)
 
         logger.log_success(
-            event="Verify Dems Case End",
+            event="Case Detail Evidence Filter End",
             message="Successfully completed AxonCaseDetailEvidenceFilter execution",
             job_id=context.aws_request_id
-         )
+        )
+        return results
+
     except Exception as e:
-        logger.log_error(event=Constants.PROCESS_NAME,error=Exception("'job_id and source_case_id are required"),job_id=context.aws_request_id)
-        
+        logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Lambda execution failed: {str(e)}"))
         return {
             'statusCode': 500,
             'body': json.dumps({'error': f'Lambda execution failed: {str(e)}'})
