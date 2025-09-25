@@ -93,7 +93,8 @@ def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
                 if param['Name'] == path:
                     config[key] = param['Value']
                     break
-          # Log retrieval status
+
+        # Log retrieval status
         logger.log_ssm_parameter_collection(
             parameter_names=list(config.keys()),
             parameters_collected=config,
@@ -205,7 +206,7 @@ def send_messages_to_queue(sqs_client, queue_url: str, messages: List[Dict], que
             
             if successful:
                 logger.log_success(event=Constants.PROCESS_NAME, message=f"Successfully sent {len(successful)} messages to {queue_type} queue")
-                logger.log_sqs_message_sent(queue_url=queue_url,mssage_id = response.get['MessageId'], message_body=batch, response_time_ms=1)
+                logger.log_sqs_message_sent(queue_url=queue_url,message_id = response.get('MessageId'), message_body=batch, response_time_ms=1)
                 
         except Exception as e:
             error_msg = f"Failed to send batch to {queue_type} queue: {str(e)}"
@@ -392,9 +393,9 @@ def get_evidence_files( job_id :str, config: Dict[str, str]) -> Dict:
        
         return filtered_results
     except Exception as db_error:
-         # Log failure to send to exception queue, but don't raise to avoid masking original error
-    
+        # Log failure to send to exception queue, but don't raise to avoid masking original error
         logger.log_error( event=Constants.PROCESS_NAME, error=db_error)
+        return {}
 
 def updateAxonTrackingDate(evidence_ids: str, keyId: str, config: Dict[str, str]) -> bool:
     """
@@ -487,8 +488,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Init db manager
         initialize_db_manager()
         
-       
-        
         if not event.get("Records"):
             logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No records found in event"))
             return {
@@ -507,7 +506,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 attr = message_attributes['job_id']
                 job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
             if 'evidence_id' in message_attributes:
-                attr = message_attributes['source_evidence_idcase_id']
+                attr = message_attributes['source_evidence_id_case_id']
                 evidence_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
 
             if not job_id or not evidence_id:
@@ -521,16 +520,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 }
             config = get_lambda_config()
 
-            evidence_results =  get_evidence_files(job_id,base_context )
+            evidence_results =  get_evidence_files(job_id,config )
             evidence_ids = ','.join(evidence_results)
-            logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, evidence_id: {evidence_id}, environment: {env_stage}", job_id=job_id)
-            proceedToNext = updateAxonTransferState( evidence_ids, config['metadata_field_id_transfer_state_downloaded_id'])
+            logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+            proceedToNext = updateAxonTransferState( evidence_ids, config['metadata_field_id_transfer_state_downloaded_id'], config)
             if proceedToNext:
                logger.log_success(
                 event="axon metadata update",
-                message="Bearer token retrieval success",
+                message="Update transfer state success",
                 job_id=context.aws_request_id,
                 custom_metadata={"status_code": "200"})
+            else:
+                logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer state not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+                return { 
+                    'statusCode':  200 ,
+                    'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
+                }
             proceedToNext = update_evidence_status(evidence_ids)
             if proceedToNext:
                 logger.log_success(
@@ -539,13 +544,20 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     job_id=context.aws_request_id,
                     custom_metadata={"status_code": "200"}
                     )
+            else:
+                logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer state not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+                return { 
+                    'statusCode':  200 ,
+                    'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
+                }
             
             proceedToNext = lambda_update_job_status(job_id,"EVIDENCE-METADATA-UPDATED","Evidence Job Status updated", Constants.PROCESS_NAME)
+            
             if proceedToNext:
                 sqs = boto3.client('sqs')
                 sqs_to_send = create_sqs_message(job_id)
 
-                send_messages_to_queue(sqs,config['q-transfer-prepare.fifo'], sqs_to_send)
+                send_messages_to_queue(sqs,config['q-transfer-prepare.fifo'], [sqs_to_send])
                 logger.log_success(
                     event="axon metadata update",
                     message="Evidence metadata Job Status updated",
@@ -567,8 +579,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
         else:
             return { 
-            'statusCode':  400 ,
-            'body': json.dumps({'error': f'Lambda execution failed: {str(e)}'})
+            'statusCode':  200 ,
+            'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
             }
     except Exception as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Lambda execution failed: {str(e)}"))
