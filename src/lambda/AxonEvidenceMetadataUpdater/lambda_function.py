@@ -28,7 +28,7 @@ db_manager = None
 # Global configuration cache
 _lambda_config = None
 
-def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
+def get_lambda_config(ssm=None,context_data: Dict[str, Any]=None) -> Dict[str, str]:
     """Get Lambda-specific configuration from SSM Parameter Store."""
     global _lambda_config
     
@@ -56,7 +56,7 @@ def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
             'axon_get_case_details_url': f'/{env_stage}/axon/api/get_case_details_url',
             'axon_metadata_field_id_transfer_utc' : f'/{env_stage}/axon/api/metadata_field_id_transfer_utc',
             'axon_metadata_field_id_transfer_state' : f'/{env_stage}/axon/api/metadata_field_id_transfer_state',
-            'metadata_field_id_transfer_state_downloaded_id' : f'{env_stage}/axon/api/metadata_field_id_transfer_state_downloaded_id',
+            'metadata_field_id_transfer_state_downloaded_id' : f'/{env_stage}/axon/api/metadata_field_id_transfer_state_downloaded_id',
             'axon_get_evidence_details_url': f'/{env_stage}/axon/api/get_evidence_details_url',
             'q-transfer-prepare.fifo': f'/{env_stage}/bridge/sqs-queues/url_q-transfer-prepare.fifo'
            
@@ -115,11 +115,16 @@ def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
 def initialize_db_manager():
     """Initialize the global DatabaseManager instance."""
     global db_manager
+    print ("in init db manager")
     if db_manager is None:
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
+        print ("got env var : " + env_stage)
         db_manager = get_db_manager(env_param_in=env_stage)
+        print(f"db manager not empty : {'got db manager' if db_manager is not None else 'db manager is none'}")
         db_manager._initialize_pool()
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Initialized DatabaseManager for environment: {env_stage}")
+    else:
+        print ("db manager already init'd")
 
 def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: str = None, 
                           source_case_id: str = None, error_message: str = None):
@@ -304,26 +309,26 @@ def updateAxonTransferState(evidence_ids: str, keyId: str, config: Dict[str, str
             return False
 
     except requests.exceptions.RequestException as e:
-        logger.error(
+        logger.log_error(
             event=Constants.PROCESS_NAME,
-            error=f"Axon Evidence Details API error: {str(e)}",
-            url=api_url
+            error=f"Axon Evidence Details API error: {str(e)}"
+           
         )
         return False
     
     except ValueError as e:
-        logger.error(
+        logger.log_error(
             event=Constants.PROCESS_NAME,
             error=f"Invalid response for evidence {evidence_ids}: {str(e)}",
-            url=api_url
+           
         )
         return False
     
     except Exception as e:
-        logger.error(
+        logger.log_error(
             event=Constants.PROCESS_NAME,
             error=f"Unexpected error for evidence {evidence_ids}: {str(e)}",
-            url=api_url
+           
         )
         return False
 
@@ -389,6 +394,7 @@ def handle_error_and_queue(
 def get_evidence_files( job_id :str, config: Dict[str, str]) -> Dict:
     try:
         results = get_evidence_files_by_job(job_id)
+        print ("evidence file data : " + json.dumps(results))
         filtered_results = {k: v.evidence_file_id for k, v in results.items() if v.evidence_transfer_state_code == "DOWNLOADED"}
        
         return filtered_results
@@ -451,26 +457,26 @@ def updateAxonTrackingDate(evidence_ids: str, keyId: str, config: Dict[str, str]
             return False
 
     except requests.exceptions.RequestException as e:
-        logger.error(
+        logger.log_error(
             event=Constants.PROCESS_NAME,
             error=f"Axon Evidence Details API error: {str(e)}",
-            url=api_url
+            
         )
         return False
     
     except ValueError as e:
-        logger.error(
+        logger.log_error(
             event=Constants.PROCESS_NAME,
             error=f"Invalid response for evidence {evidence_ids}: {str(e)}",
-            url=api_url
+          
         )
         return False
     
     except Exception as e:
-        logger.error(
+        logger.log_error(
             event=Constants.PROCESS_NAME,
             error=f"Unexpected error for evidence {evidence_ids}: {str(e)}",
-            url=api_url
+            
         )
         return False
      
@@ -496,7 +502,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
 
       
-
         for record in event["Records"]:
             message_attributes = record.get('messageAttributes', {})
             evidence_id  = None
@@ -506,7 +511,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 attr = message_attributes['job_id']
                 job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
             if 'evidence_id' in message_attributes:
-                attr = message_attributes['source_evidence_id_case_id']
+                attr = message_attributes['evidence_id']
                 evidence_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
 
             if not job_id or not evidence_id:
@@ -518,7 +523,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                         'received_event': event
                     })
                 }
-            config = get_lambda_config()
+            config = get_lambda_config(context_data=base_context)
 
             evidence_results =  get_evidence_files(job_id,config )
             evidence_ids = ','.join(evidence_results)
@@ -552,7 +557,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 }
             
             proceedToNext = lambda_update_job_status(job_id,"EVIDENCE-METADATA-UPDATED","Evidence Job Status updated", Constants.PROCESS_NAME)
-            
+
             if proceedToNext:
                 sqs = boto3.client('sqs')
                 sqs_to_send = create_sqs_message(job_id)
