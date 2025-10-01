@@ -116,12 +116,12 @@ def get_lambda_config(ssm=None,context_data: Dict[str, Any]=None) -> Dict[str, s
 def initialize_db_manager():
     """Initialize the global DatabaseManager instance."""
     global db_manager
-    print ("in init db manager")
+    #print ("in init db manager")
     if db_manager is None:
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-        print ("got env var : " + env_stage)
+      
         db_manager = get_db_manager(env_param_in=env_stage)
-        print(f"db manager not empty : {'got db manager' if db_manager is not None else 'db manager is none'}")
+       
         db_manager._initialize_pool()
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Initialized DatabaseManager for environment: {env_stage}")
     else:
@@ -159,6 +159,9 @@ def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: s
 def create_sqs_message(job_id: str) -> Dict:
     """Create a properly formatted SQS message for evidence download."""
     current_utc_time = datetime.now(timezone.utc) 
+    messageDupId = job_id + " " + str(current_utc_time)
+    cleaned_string = ''.join(char for char in messageDupId if char.isalnum())
+    
     return {
         'Id': job_id,  # Must be unique within the batch
         'MessageBody': json.dumps({
@@ -166,7 +169,7 @@ def create_sqs_message(job_id: str) -> Dict:
            
         }),
         'MessageGroupId': f"job-{job_id}",  # Required for FIFO queues
-        'MessageDeduplicationId': f"{job_id}-{current_utc_time}",  # Required for FIFO queues
+        'MessageDeduplicationId': f"{cleaned_string}",  # Required for FIFO queues
         'MessageAttributes': {
             'JobId': {
                 'StringValue': job_id,
@@ -191,6 +194,9 @@ def send_messages_to_queue(sqs_client, queue_url: str, messages: List[Dict], que
         batch = messages[i:i + Constants.SQS_BATCH_SIZE]
         
         try:
+            sqs_client.set_queue_attributes( QueueUrl=queue_url,
+            Attributes={'KmsMasterKeyId': 'alias/aws/sqs'})
+
             response = sqs_client.send_message_batch(
                 QueueUrl=queue_url,
                 Entries=batch
@@ -212,7 +218,9 @@ def send_messages_to_queue(sqs_client, queue_url: str, messages: List[Dict], que
             
             if successful:
                 logger.log_success(event=Constants.PROCESS_NAME, message=f"Successfully sent {len(successful)} messages to {queue_type} queue")
-                logger.log_sqs_message_sent(queue_url=queue_url,message_id = response.get('MessageId'), message_body=batch, response_time_ms=1)
+                # if 'MessageId' in response:
+                #     sentMsgId = response['MessageId']
+                #     logger.log_sqs_message_sent(queue_url=queue_url,message_id =sentMsgId , message_body=batch, response_time_ms=1)
                 
         except Exception as e:
             error_msg = f"Failed to send batch to {queue_type} queue: {str(e)}"
@@ -231,21 +239,29 @@ def send_messages_to_queue(sqs_client, queue_url: str, messages: List[Dict], que
 def lambda_update_job_status( job_id: str, status_value: str, msg:str, process_name:str):
     """Update job status in the database."""
     job_status_code = db_manager.get_status_code_by_value(value=status_value)
-    if job_status_code:
-        status_identifier = str(job_status_code["identifier"])
-        db_manager.update_job_status(
+   
+    try:
+        if job_status_code:
+            status_identifier = str(job_status_code["identifier"])
+            
+            db_manager.update_job_status(
             job_id=job_id,
             status_code=status_identifier,
             job_msg=msg,
             last_modified_process=process_name
-        )
+            )
+            return True
+    except Exception as e:
+        logger.log_error(event=Constants.PROCESS_NAME + " lambda update job status", error=e)
+        return False
 
 def update_evidence_status( evidence_ids:str)->bool:
     job_status_code = db_manager.get_status_code_by_value(value="METADATA-UPDATED")
     try:
         if (job_status_code and evidence_ids):
+            status_identifier = str(job_status_code["identifier"])
             for item in evidence_ids.split(','):
-                update_evidence_file_state(item,job_status_code,"lambda:" + Constants.PROCESS_NAME)
+                update_evidence_file_state(item,status_identifier,"lambda:" + Constants.PROCESS_NAME)
         logger.log_success( event=Constants.PROCESS_NAME, message=f"Successfully updated {len(evidence_ids)} evidence files")
         return True
     except Exception as e:
@@ -279,11 +295,17 @@ def updateAxonTransferState(evidence_ids: str, keyId: str, config: Dict[str, str
         api_url = f"{config['axon_base_url']}api/v1/agencies/{config['axon_agency_id']}/evidence/managed-metadata"
         
        # Split the string by commas to get a list of IDs
-        evidence_ids_json = [id.strip() for id in evidence_ids.split(',')]
+       # evidence_ids_json = [id.strip() for id in evidence_ids.split(',')]
 
         # Format it as a JSON-like string for "evidenceIds" array
         
-        json_array = '["' + '","'.join(evidence_ids_json) + '"]' 
+        #json_array = '["' + '","'.join(evidence_ids_json) + '"]' 
+        try:
+            evidence_ids_list = json.loads(evidence_ids)
+        except json.JSONDecodeError:
+            # Fallback: If it's plain comma-separated (no JSON wrapping), split and clean
+            evidence_ids_list = [id.strip().strip('"') for id in evidence_ids.strip('[]').split(',')]
+
 
         # Example payload (adjust based on actual API requirements)
         payload = {
@@ -293,29 +315,29 @@ def updateAxonTransferState(evidence_ids: str, keyId: str, config: Dict[str, str
                     "values" :[
                         config['metadata_field_id_transfer_state_downloaded_id']
                     ],
-                    "evidenceIds" : json_array
+                    "evidenceIds" : evidence_ids_list
 
                 }
             }
             
         }
-        print("sending payload : " + payload)
+        
         # Make the API call (assuming PUT for updating state)
         response = requests.patch(api_url, json=payload, headers=headers)
         response.raise_for_status()  # Raises an HTTPError for bad responses (4xx, 5xx)
 
         # Check if the response indicates success
         if response.status_code == 200:
-            logger.log_success(f"Successfully updated transfer state for evidence {evidence_ids}")
+            logger.log_success(event="updateTransferstate", message=f"Successfully updated transfer state for evidence {evidence_ids}")
             return True
         else:
-            logger.warning(f"Unexpected response for evidence {evidence_ids}: {response.status_code}")
+            logger.log_success(event="updateTransferstate", message=f"Unexpected response for evidence {evidence_ids}: {response.status_code}")
             return False
 
     except requests.exceptions.RequestException as e:
         logger.log_error(
             event=Constants.PROCESS_NAME,
-            error=f"Axon Evidence Details API error: {str(e)}"
+            error=f"Response text : {response.text} Axon Evidence Details API error: {str(e)}"
            
         )
         return False
@@ -426,8 +448,7 @@ def updateAxonTrackingDate(evidence_ids: str, keyId: str, config: Dict[str, str]
     Raises:
         Exception: If the API call fails or the response is invalid.
     """
-    if config["axon_bearer_token"] is not None:
-        print("bearer not empty")
+    
     try:
         headers = {
             'Authorization': f'Bearer {config["axon_bearer_token"]}',
@@ -438,12 +459,13 @@ def updateAxonTrackingDate(evidence_ids: str, keyId: str, config: Dict[str, str]
         api_url = f"{config['axon_base_url']}api/v1/agencies/{config['axon_agency_id']}/evidence/managed-metadata"
         
         current_utc_time = datetime.now(timezone.utc)
+        formatted_time = current_utc_time.strftime("%Y-%m-%d %H:%M:%S")
        
-         # Split the string by commas to get a list of IDs
-        evidence_ids_json = [id.strip() for id in evidence_ids.split(',')]
-
-        # Format it as a JSON-like string for "evidenceIds" array
-        json_array = '["' + '","'.join(evidence_ids_json) + '"]' 
+        try:
+            evidence_ids_list = json.loads(evidence_ids)
+        except json.JSONDecodeError:
+            # Fallback: If it's plain comma-separated (no JSON wrapping), split and clean
+            evidence_ids_list = [id.strip().strip('"') for id in evidence_ids.strip('[]').split(',')]
 
         # Example payload (adjust based on actual API requirements)
         payload = {
@@ -451,25 +473,25 @@ def updateAxonTrackingDate(evidence_ids: str, keyId: str, config: Dict[str, str]
                 "attributes" : {
                     "keyId" : keyId,
                     "values" :[
-                        current_utc_time
+                        formatted_time
                     ],
-                    "evidenceIds" : json_array
+                    "evidenceIds" : evidence_ids_list
 
                 }
             }
             
         }
-        print("sending payload : " + payload)
+        
         # Make the API call (assuming PUT for updating state)
         response = requests.patch(api_url, json=payload, headers=headers)
         response.raise_for_status()  # Raises an HTTPError for bad responses (4xx, 5xx)
 
         # Check if the response indicates success
         if response.status_code == 200:
-            logger.log_success(f"Successfully updated transfer date for evidence {evidence_ids}")
+            logger.log_success(event="updateAxonTrackingDate", message=f"Successfully updated transfer date for evidence {evidence_ids}")
             return True
         else:
-            logger.warning(f"Unexpected response for evidence {evidence_ids}: {response.status_code}")
+            logger.log_success(event="updateAxonTrackingDate",message=f"Unexpected response for evidence {evidence_ids}: {response.status_code}")
             return False
 
     except requests.exceptions.RequestException as e:
@@ -543,7 +565,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             proceedToNext = False
             evidence_results =  get_evidence_files(job_id,config )
             evidence_ids = ','.join(evidence_results)
-            keyId = config['metadata_field_id_transfer_state_downloaded_id']
+            keyId = config['axon_metadata_field_id_transfer_state']
             logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
             if len(evidence_ids) > 0 and len(keyId) > 0:
                 proceedToNext = updateAxonTransferState( evidence_ids, keyId, config)
@@ -556,13 +578,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 custom_metadata={"status_code": "200"})
             else:
                 logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer state not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+                logger.log_success(
+                event="Evidence Metadata Updater End",
+                message="Successfully completed AxonEvidenceMetadataUpdater execution",
+                job_id=context.aws_request_id
+                )
                 return { 
                     'statusCode':  200 ,
                     'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
                 }
             keyId = config['axon_metadata_field_id_transfer_utc']
             if len(evidence_ids) > 0 and len(keyId) > 0:
-                proceedToNext = updateAxonTrackingDate(evidence_ids, keyId)
+                proceedToNext = updateAxonTrackingDate(evidence_ids,   keyId,config)
             if proceedToNext:
                logger.log_success(
                 event="axon metadata update",
@@ -571,16 +598,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 custom_metadata={"status_code": "200"})
             else:
                 logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer date not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+                logger.log_success(
+                    event="Evidence Metadata Updater End",
+                    message="Successfully completed AxonEvidenceMetadataUpdater execution",
+                    job_id=context.aws_request_id
+                    )
                 return { 
                     'statusCode':  200 ,
                     'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
                 }
             if proceedToNext and len(evidence_ids) > 0:
                 proceedToNext = update_evidence_status(evidence_ids)
+            else:
+                proceedToNext = False
+                logger.log_success(event=Constants.PROCESS_NAME, message=f"update_evidence_status not called, evidence_ids empty  job_id: {job_id}, environment: {env_stage}", job_id=job_id)
             if proceedToNext:
                 logger.log_success(
                     event="axon metadata update",
-                    message="Bearer token retrieval success",
+                    message="update_evidence_status success",
                     job_id=context.aws_request_id,
                     custom_metadata={"status_code": "200"}
                     )
@@ -591,13 +626,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
                 }
             if proceedToNext:
-                proceedToNext = lambda_update_job_status(job_id,"EVIDENCE-METADATA-UPDATED","Evidence Job Status updated", Constants.PROCESS_NAME)
+                proceedToNext = lambda_update_job_status(job_id,"METADATA-UPDATED","Evidence Job Status updated", Constants.PROCESS_NAME)
 
             if proceedToNext:
                 sqs = boto3.client('sqs')
                 sqs_to_send = create_sqs_message(job_id)
 
-                send_messages_to_queue(sqs,config['q-transfer-prepare.fifo'], [sqs_to_send])
+                send_messages_to_queue(sqs,config['q-transfer-prepare.fifo'], [sqs_to_send], "normal")
                 logger.log_success(
                     event="axon metadata update",
                     message="Evidence metadata Job Status updated",
