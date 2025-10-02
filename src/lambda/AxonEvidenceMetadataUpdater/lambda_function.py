@@ -568,50 +568,61 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             keyId = config['axon_metadata_field_id_transfer_state']
             logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
             if len(evidence_ids) > 0 and len(keyId) > 0:
-                proceedToNext = updateAxonTransferState( evidence_ids, keyId, config)
 
-            if proceedToNext:
-               logger.log_success(
-                event="axon metadata update",
-                message="Update transfer state success",
-                job_id=context.aws_request_id,
-                custom_metadata={"status_code": "200"})
-            else:
-                logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer state not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
-                logger.log_success(
-                event="Evidence Metadata Updater End",
-                message="Successfully completed AxonEvidenceMetadataUpdater execution",
-                job_id=context.aws_request_id
-                )
-                return { 
-                    'statusCode':  200 ,
-                    'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
-                }
-            keyId = config['axon_metadata_field_id_transfer_utc']
-            if len(evidence_ids) > 0 and len(keyId) > 0:
-                proceedToNext = updateAxonTrackingDate(evidence_ids,   keyId,config)
-            if proceedToNext:
-               logger.log_success(
-                event="axon metadata update",
-                message="Update transfer UTC Date success",
-                job_id=context.aws_request_id,
-                custom_metadata={"status_code": "200"})
-            else:
-                logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer date not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
-                logger.log_success(
+                if updateAxonTransferState( evidence_ids, keyId, config):
+                    logger.log_success(
+                    event="axon metadata update",
+                    message="Update transfer state success",
+                    job_id=context.aws_request_id,
+                    custom_metadata={"status_code": "200"})
+                else:
+                    logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer state not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+                    logger.log_success(
                     event="Evidence Metadata Updater End",
                     message="Successfully completed AxonEvidenceMetadataUpdater execution",
                     job_id=context.aws_request_id
                     )
-                return { 
-                    'statusCode':  200 ,
-                    'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
-                }
-            if proceedToNext and len(evidence_ids) > 0:
-                proceedToNext = update_evidence_status(evidence_ids)
-            else:
-                proceedToNext = False
-                logger.log_success(event=Constants.PROCESS_NAME, message=f"update_evidence_status not called, evidence_ids empty  job_id: {job_id}, environment: {env_stage}", job_id=job_id)
+                    return { 
+                        'statusCode':  200 ,
+                        'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
+                    }
+                keyId = config['axon_metadata_field_id_transfer_utc']
+                if len(evidence_ids) > 0 and len(keyId) > 0:
+                    if  updateAxonTrackingDate(evidence_ids,   keyId,config) :
+                
+                        logger.log_success(
+                        event="axon metadata update",
+                        message="Update transfer UTC Date success",
+                        job_id=context.aws_request_id,
+                        custom_metadata={"status_code": "200"})
+                    else:
+                        logger.log_success(event=Constants.PROCESS_NAME, message=f"Transfer date not updated for  job_id: {job_id}, evidence_ids: {evidence_ids}, environment: {env_stage}", job_id=job_id)
+                        logger.log_success(
+                        event="Evidence Metadata Updater End",
+                        message="Successfully completed AxonEvidenceMetadataUpdater execution",
+                        job_id=context.aws_request_id
+                        )
+                        return { 
+                        'statusCode':  200 ,
+                        'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
+                        }
+                if len(evidence_ids) > 0:
+                    if  update_evidence_status(evidence_ids):
+                          logger.log_success(
+                            event="Evidence Metadata Updater End",
+                            message="Successfully completed AxonEvidenceMetadataUpdater execution",
+                            job_id=context.aws_request_id
+                            )
+                       
+                    else:
+                        proceedToNext = False
+                        logger.log_success(event=Constants.PROCESS_NAME, message=f"update_evidence_status not called, evidence_ids empty  job_id: {job_id}, environment: {env_stage}", job_id=job_id)
+                else:
+                     return { 
+                            'statusCode':  200 ,
+                            'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
+                            }
+
             if proceedToNext:
                 logger.log_success(
                     event="axon metadata update",
