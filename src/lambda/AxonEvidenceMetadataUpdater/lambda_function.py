@@ -22,6 +22,8 @@ class Constants:
     SIZE_THRESHOLD_BYTES = 10 * 1024 * 1024 * 1024  # 10GB
     SQS_BATCH_SIZE = 10
     DOWNLOADED_STATE_CODE = 45
+    METADATA_UPDATED_JOB_STATUS = "METADATA-UPDATED"
+    NORMAL_QUEUE = "normal"
 
 logger = LambdaStructuredLogger()
 db_manager = None
@@ -256,7 +258,7 @@ def lambda_update_job_status( job_id: str, status_value: str, msg:str, process_n
         return False
 
 def update_evidence_status( evidence_ids:str)->bool:
-    job_status_code = db_manager.get_status_code_by_value(value="METADATA-UPDATED")
+    job_status_code = db_manager.get_status_code_by_value(value=Constants.MET)
     try:
         if (job_status_code and evidence_ids):
             status_identifier = str(job_status_code["identifier"])
@@ -636,38 +638,32 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     'statusCode':  200 ,
                     'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
                 }
-            if proceedToNext:
-                proceedToNext = lambda_update_job_status(job_id,"METADATA-UPDATED","Evidence Job Status updated", Constants.PROCESS_NAME)
-
-            if proceedToNext:
+            
+            if lambda_update_job_status(job_id, Constants.METADATA_UPDATED_JOB_STATUS,"Evidence Job Status updated", Constants.PROCESS_NAME):
                 sqs = boto3.client('sqs')
                 sqs_to_send = create_sqs_message(job_id)
 
-                send_messages_to_queue(sqs,config['q-transfer-prepare.fifo'], [sqs_to_send], "normal")
+                send_messages_to_queue(sqs,config['q-transfer-prepare.fifo'], [sqs_to_send], Constants.NORMAL_QUEUE)
                 logger.log_success(
                     event="axon metadata update",
                     message="Evidence metadata Job Status updated",
                     job_id=job_id,
                     custom_metadata={"status_code": "200", "msg" : "Evidence metadata Job Status Updated"}
                     )
+                logger.log_success( event="Evidence Metadata Updater End",
+                    message="Successfully completed AxonEvidenceMetadataUpdater execution",
+                    job_id=context.aws_request_id)
+                return {
+                    'statusCode':  200 ,
+                    'body': json.dumps({'success': f'Lambda function execution completed'})
+                }
             else:
                 logger.log_error(event=Constants.PROCESS_NAME, error=Exception("Call to update Axon Transfer state resulted in an error"))
+                return { 
+                'statusCode':  200 ,
+                'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
+                }
 
-        logger.log_success(
-            event="Evidence Metadata Updater End",
-            message="Successfully completed AxonEvidenceMetadataUpdater execution",
-            job_id=context.aws_request_id
-        )
-        if proceedToNext:
-            return {
-            'statusCode':  200 ,
-            'body': json.dumps({'success': f'Lambda function execution completed'})
-            }
-        else:
-            return { 
-            'statusCode':  200 ,
-            'body': json.dumps({'error': f'Lambda execution completed, evidence files not updated.'})
-            }
     except Exception as e:
         logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Lambda execution failed: {str(e)}"))
         return {
