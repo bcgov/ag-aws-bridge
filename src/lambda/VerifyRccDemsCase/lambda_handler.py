@@ -86,11 +86,12 @@ def parse_message_attributes(message: dict) -> tuple:
     body = message.get('MessageAttributes', {})
     job_id = body.get("Job_id", {}).get('StringValue')
     case_title = body.get("Source_case_title", {}).get('StringValue')
+    carJurId = body.get("cadJurId", {}).get('StringValue')
     
-    if not job_id or not case_title:
-        raise ValueError("Missing job_id or Source_case_title in message")
+    if not job_id or not case_title or not carJurId :
+        raise ValueError("Missing job_id or Source_case_title or cadJurId in message")
     
-    return job_id, case_title
+    return job_id, case_title, carJurId
 
 def parse_case_title(case_title: str) -> tuple:
     """Parse agency and file number from case title."""
@@ -100,16 +101,26 @@ def parse_case_title(case_title: str) -> tuple:
     
     return parts[0].strip(), '-'.join(parts[1:]).strip()
 
-def lookup_agency_code(agency_code_table, rms_jur_id: str, logger: LambdaStructuredLogger, job_id: str) -> tuple:
+def lookup_agency_code(agency_code_table, rms_jur_id: str, cadJurId:str, logger: LambdaStructuredLogger, job_id: str) -> tuple:
     """Lookup agency code in DynamoDB."""
     logger.log(event="Agency Code Lookup", status=LogStatus.IN_PROGRESS, message="Retrieving agency code...", job_id=job_id)
     
-    dynamo_response = agency_code_table.get_item(Key={'rmsJurId': rms_jur_id})
+    dynamo_response = agency_code_table.get_item(Key={'rmsJurId ': rms_jur_id})
     item = dynamo_response.get('Item')
     
     if not item:
-        logger.log_error(event="Agency Code Lookup Failed", error=f"No item found for rmsJurId: {rms_jur_id}", job_id=job_id)
-
+        """ Try again with cadJurId"""
+        dynamo_response = agency_code_table.query(IndexName="cadJurId-GSI",
+                                            KeyConditionExpression="#cadJurId = :cadJurId_val", 
+                                            ExpressionAttributeNames={"#cadJurId": "cadJurId"},  # Avoid reserved word issues,
+                                            ExpressionAttributeValues={":cadJurId_val": cadJurId})
+        dynamo_response = agency_code_table.get_item(Key={'cadJurId ': cadJurId})
+        item = dynamo_response.get('Item')
+        if not item:
+            logger.log_error(event="Agency Code Lookup Failed", error=f"No item found for rmsJurId : {rms_jur_id} or cadJurid: {cadJurId} ", job_id=job_id)
+            return None, None, None
+       
+        logger.log(event="Axon Case Agency Lookup", status=LogStatus.IN_PROGRESS, message=f"Agency prefix lookup successful", job_id=job_id)
         return None, None, None
     
     return (
@@ -217,10 +228,10 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
     try:
         # Get environment stage from environment variable
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-        job_id, case_title = parse_message_attributes(message)
+        job_id, case_title, cadJurId = parse_message_attributes(message)
         rms_jur_id, agency_file_number = parse_case_title(case_title)
         
-        agency_id_code, sub_agency_yn, sub_agencies = lookup_agency_code(agency_code_table, rms_jur_id, logger, job_id)
+        agency_id_code, sub_agency_yn, sub_agencies = lookup_agency_code(agency_code_table, rms_jur_id, cadJurId, logger, job_id)
         if not agency_id_code:
             status_value =  "INVALID-AGENCY-IDENTIFIER"
             update_job_status(db_manager, job_id, status_value, logger)
