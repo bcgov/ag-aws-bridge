@@ -635,6 +635,28 @@ class DatabaseManager:
         if result and len(result) > 0:
             return result[0]['source_agency']
         return None
+    
+    def get_source_agency(self, job_id: str) -> str | None:
+        """
+        Get source_agency (guid value) for a specific job 
+        
+        Args:
+            job_id: The job ID to look up
+            
+        Returns:
+            str | None: The source_agency GUID value, or None if not found or state is not 30
+        """
+        query = """
+            SELECT j.source_agency 
+            FROM evidence_transfer_jobs j
+            WHERE j.job_id = %s 
+        """
+        
+        result = self.execute_query(query, (job_id,))
+        
+        if result and len(result) > 0:
+            return result[0]['source_agency']
+        return None
 
     def get_source_case_information(self, job_id: str) -> Dict[str, Any] | None:
         """
