@@ -12,6 +12,9 @@ from botocore.config import Config
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
 
+class Constants:
+    IN_PROGRESS = "IN_PROGRESS",
+    ERROR = "ERROR"
 
 def initialize_aws_clients(env_stage: str) -> tuple:
     """Initialize AWS clients and resources with custom configuration."""
@@ -240,7 +243,7 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
         
         logger.log(
             event="Axon Case Agency Lookup",
-            status="IN_PROGRESS",
+            status=LogStatus.IN_PROGRESS,
             message="Agency prefix lookup successful",
             job_id=job_id,
             custom_metadata={
@@ -283,7 +286,7 @@ def process_message(message: dict, parameters: dict, http: urllib3.PoolManager, 
         if not found_dems_case:
             logger.log(
                 event="axonRccAndDemsCaseValidator",
-                status="ERROR",
+                status= Constants.ERROR,
                 message="Agency prefix lookup unsuccessful - not matched",
                 job_id=job_id,
                 additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
@@ -312,7 +315,7 @@ def lambda_handler(event, context):
         messages = receive_sqs_messages(sqs_client, 'q-case-found.fifo', logger, context.aws_request_id)
         
         if not messages:
-            logger.log(event="SQS Poll", status="IN_PROGRESS", message="No messages in queue", job_id=context.aws_request_id)
+            logger.log(event="SQS Poll", status=Constants.IN_PROGRESS, message="No messages in queue", job_id=context.aws_request_id)
             return {'statusCode': 200, 'body': 'No messages to process'}
         
         for message in messages:
