@@ -5,6 +5,8 @@ import urllib.parse
 import os
 import time
 import botocore.exceptions
+import random
+import string
 
 from datetime import datetime, timezone, timedelta
 from botocore.config import Config
@@ -226,6 +228,12 @@ class DemsCaseValidator:
     def send_sqs_message(self, queue_name: str, job_id: str, case_id: str,
                          current_timestamp: str, custom_exception: Exception = None, case_title: str = None):
         """Send message to SQS queue."""
+        # Define the alphanumeric character pool
+        alphanumeric_chars = string.ascii_letters + string.digits
+
+        # Generate a random string of 20 characters
+        random_string = ''.join(random.choices(alphanumeric_chars, k=20))
+
         try:
             queue_url = self.sqs_client.get_queue_url(QueueName=queue_name)['QueueUrl']
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
@@ -252,13 +260,14 @@ class DemsCaseValidator:
                 MessageBody='Sending SQS message to ' + queue_name,
                 DelaySeconds=0,
                 MessageGroupId="axon-evidence-transfer",
-                MessageDeduplicationId=job_id,
+                MessageDeduplicationId=random_string,
                 MessageAttributes=message_attributes
             )
             
             self.logger.log_sqs_message_sent(
                 queue_url=queue_url,
                 message_id=response,
+                response_time_ms=1,
                 message_body={
                     "timestamp": current_timestamp,
                     "level": "INFO",
@@ -270,7 +279,7 @@ class DemsCaseValidator:
                     "additional_info": {
                         "target_queue": queue_name,
                         "message_group_id": job_id,
-                        "deduplication_id": "file-" + response
+                        "deduplication_id": "file-" + random_string
                     }
                 }
             )
@@ -288,7 +297,7 @@ class DemsCaseValidator:
                 status_value = "INVALID-AGENCY-IDENTIFIER"
                 self.update_job_status(job_id, status_value)
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-                self.send_sqs_message('q-transfer-exception', job_id, case_title, current_timestamp, Exception("Agency Code not found"), case_title)
+                self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Agency Code not found"), case_title)
                 return
             
             self.logger.log(
@@ -341,7 +350,7 @@ class DemsCaseValidator:
                     job_id=job_id,
                     additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
                 )
-                self.send_sqs_message('q-transfer-exception', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
+                self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
                 
         except Exception as msg_err:
             self.logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=self.job_id)
