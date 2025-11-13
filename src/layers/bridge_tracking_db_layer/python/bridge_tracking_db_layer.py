@@ -318,13 +318,13 @@ class DatabaseManager:
             job_id, job_created_utc, job_status_code, job_msg, source_system, source_agency,
             source_case_id, source_case_title, source_case_last_modified_utc,
             source_case_evidence_count_total, source_case_evidence_count_to_download,
-            source_case_evidence_count_downloaded, dems_case_id, last_modified_process,
+            source_case_evidence_count_downloaded, dems_case_id,  last_modified_process,
             last_modified_utc, retry_count, max_retries
         ) VALUES (
             %(job_id)s, NOW(), %(job_status_code)s, %(job_msg)s, %(source_system)s, %(source_agency)s,
             %(source_case_id)s, %(source_case_title)s, %(source_case_last_modified_utc)s,
             %(source_case_evidence_count_total)s, %(source_case_evidence_count_to_download)s,
-            %(source_case_evidence_count_downloaded)s, %(dems_case_id)s, %(last_modified_process)s,
+            %(source_case_evidence_count_downloaded)s, %(dems_case_id)s, %(agency_id_code)s, %(agency_file_number)s, %(last_modified_process)s,
             NOW(), %(retry_count)s, %(max_retries)s
         ) RETURNING *
         """
@@ -333,6 +333,8 @@ class DatabaseManager:
         job_data.setdefault('job_msg', None)
         job_data.setdefault('source_case_evidence_count_to_download', 0)
         job_data.setdefault('source_case_evidence_count_downloaded', 0)
+        job_data.setdefault('agency_id_code', '')
+        job_data.setdefault('agency_file_number', '')
         job_data.setdefault('dems_case_id', None)
         job_data.setdefault('retry_count', 0)
         job_data.setdefault('max_retries', 3)
@@ -344,16 +346,16 @@ class DatabaseManager:
         query = "SELECT * FROM evidence_transfer_jobs WHERE job_id = %s"
         return self.execute_query_one(query, (job_id,))
     
-    def update_job_status(self, job_id: str, status_code: int, job_msg: str = None, 
+    def update_job_status(self, job_id: str, status_code: int, agency_id_code: str, agency_file_number : str,job_msg: str = None, 
                          last_modified_process: str = None) -> Dict:
         """Update job status."""
         query = """
             UPDATE evidence_transfer_jobs 
-            SET job_status_code = %s, job_msg = %s, last_modified_process = %s, last_modified_utc = NOW()
+            SET job_status_code = %s, job_msg = %s, last_modified_process = %s, last_modified_utc = NOW() , agency_id_code= %s, agency_file_number=%s
             WHERE job_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (status_code, job_msg, last_modified_process, job_id), True)
+        return self.execute_query_one(query, (status_code, job_msg, last_modified_process, agency_id_code, agency_file_number, job_id), True)
     
     def update_job_counts(self, job_id: str, total: int = None, to_download: int = None, 
                          downloaded: int = None, last_modified_process: str = None) -> Dict:
@@ -932,9 +934,9 @@ def create_evidence_transfer_job(job_data: Dict[str, Any]) -> Dict:
 def get_evidence_transfer_job(job_id: str) -> Optional[Dict]:
     return get_db_manager().get_evidence_transfer_job(job_id)
 
-def update_job_status(job_id: str, status_code: int, job_msg: str = None, 
+def update_job_status(job_id: str, status_code: int, agency_id_code:str, agency_file_number:str,job_msg: str = None, 
                      last_modified_process: str = None) -> Dict:
-    return get_db_manager().update_job_status(job_id, status_code, job_msg, last_modified_process)
+    return get_db_manager().update_job_status(job_id, status_code, agency_id_code, agency_file_number, job_msg, last_modified_process)
 
 def update_job_counts(job_id: str, total: int = None, to_download: int = None, 
                      downloaded: int = None, last_modified_process: str = None) -> Dict:
