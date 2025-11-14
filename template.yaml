@@ -173,7 +173,7 @@ Resources:
         SQSEvent:
           Type: SQS
           Properties:
-            Queue: arn:aws:sqs:ca-central-1:731386536779:q-evidence-data-transfer.fifo
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-data-transfer.fifo
             BatchSize: 1
             MaximumBatchingWindowInSeconds: 0
       Layers:
