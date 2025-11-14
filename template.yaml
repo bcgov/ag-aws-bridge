@@ -183,7 +183,7 @@ Resources:
         Variables:
           ENV_STAGE: !Ref Environment
           INTERMEDIATE_ROLE_ARN: arn:aws:iam::731386536779:role/edt-s3-pdems-staging-access
-      Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-data-transferor-role"
+      Role: !Sub "arn:aws:iam::731386536779:role/bridge-data-transfer-role"
       VpcConfig:
         SecurityGroupIds:
           - sg-048a4f967f32fc802
