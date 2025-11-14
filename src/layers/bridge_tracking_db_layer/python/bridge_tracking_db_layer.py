@@ -125,6 +125,7 @@ class DatabaseManager:
     def execute_query(self, query: str, params: tuple = None, autoCommit: bool=False) -> List[Dict]:
         """Execute a query and return results as list of dictionaries."""
         with self.get_connection() as conn:
+            
             conn.autocommit = autoCommit
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, params)
@@ -873,7 +874,7 @@ class DatabaseManager:
     def health_check(self) -> Dict[str, Any]:
         """Check database health."""
         try:
-            result = self.execute_query_one("SELECT NOW() as current_time")
+            result = self.execute_query_one("SELECT NOW() as current_time", True)
             return {
                 "healthy": True,
                 "timestamp": result["current_time"].isoformat() if result else None
