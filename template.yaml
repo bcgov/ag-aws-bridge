@@ -168,7 +168,7 @@ Resources:
       Runtime: python3.11
       Architectures:
         - x86_64
-      Timeout: 300
+      Timeout: 900
       Events:
         SQSEvent:
           Type: SQS
