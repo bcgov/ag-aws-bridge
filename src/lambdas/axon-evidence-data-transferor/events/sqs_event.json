@@ -1,0 +1,25 @@
+{
+  "Records": [
+    {
+      "messageId": "test-message-123",
+      "receiptHandle": "test-receipt-handle",
+      "body": "{\"job_id\": \"9ac2505b-cdd5-4fdf-a488-89a8a102df2a\"}",
+      "attributes": {
+        "ApproximateReceiveCount": "1",
+        "SentTimestamp": "1693123456789",
+        "SenderId": "AIDAIENQZJOLO23YVJ4VO",
+        "ApproximateFirstReceiveTimestamp": "1693123456789"
+      },
+      "messageAttributes": {
+        "JobId": {
+          "stringValue": "9ac2505b-cdd5-4fdf-a488-89a8a102df2a",
+          "dataType": "String"
+        }
+      },
+      "md5OfBody": "test-md5-hash",
+      "eventSource": "aws:sqs",
+      "eventSourceARN": "arn:aws:sqs:ca-central-1:123456789012:file-download-queue.fifo",
+      "awsRegion": "ca-central-1"
+    }
+  ]
+}
