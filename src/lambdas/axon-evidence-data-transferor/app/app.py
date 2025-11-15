@@ -119,58 +119,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             },
         )
 
-        # Collect EDT DEMS S3 temporary credentials
+        # Assume EDT's role
         logger.log(
             event=event,
             level=LogLevel.INFO,
             status=LogStatus.IN_PROGRESS,
-            message="axon_evidence_data_transferor_assuming_role",
+            message="axon_evidence_data_transferor_assuming_edt_role",
             context_data={
                 "env_stage": env_stage,
                 "job_id": job_id,
             },
         )
-
-        # Step 1: Assume intermediate role
-        intermediate_role_arn = os.environ.get(
-            'INTERMEDIATE_ROLE_ARN',
-            'arn:aws:iam::731386536779:role/edt-s3-pdems-staging-access'
-        )
-        sts_client = boto3.client('sts', region_name='ca-central-1')
-        intermediate_creds = sts_client.assume_role(
-            RoleArn=intermediate_role_arn,
-            RoleSessionName=f"bridge-intermediate-{job_id}"
-        )
-
-        logger.log(
-            event=event,
-            level=LogLevel.INFO,
-            status=LogStatus.SUCCESS,
-            message="axon_evidence_data_transferor_intermediate_role_assumed",
-            context_data={
-                "env_stage": env_stage,
-                "job_id": job_id,
-                "intermediate_role": intermediate_role_arn,
-            },
-        )
-
-        # Step 2: Use intermediate credentials to assume EDT's role
+        
+        # Initialize STS Credential Manager (uses Lambda's current role credentials)
         cred_manager = STSCredentialManager(region_name='ca-central-1')
-
-        # Override the STS client to use intermediate credentials
-        cred_manager.sts_client = boto3.client(
-            'sts',
-            aws_access_key_id=intermediate_creds['Credentials']['AccessKeyId'],
-            aws_secret_access_key=intermediate_creds['Credentials']['SecretAccessKey'],
-            aws_session_token=intermediate_creds['Credentials']['SessionToken'],
-            region_name='ca-central-1'
-        )
-
-        # Now assume EDT's role (retrieved from SSM)
+        
+        # Assume EDT's role using job_id - duration of 1800 seconds (30 minutes)
         temp_credentials = cred_manager.assume_role_with_job_id(
             job_id=job_id,
             duration=1800
         )
+        
         if not temp_credentials:
             error_msg = f"Failed to assume EDT DEMS role for job_id: {job_id}"
             logger.log(
@@ -190,7 +159,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             event=event,
             level=LogLevel.INFO,
             status=LogStatus.SUCCESS,
-            message="axon_evidence_data_transferor_role_assumed",
+            message="axon_evidence_data_transferor_edt_role_assumed",
             context_data={
                 "env_stage": env_stage,
                 "job_id": job_id,
@@ -202,7 +171,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Get source and destination S3 information
         # source_bucket = ssm_parameters['bridge_s3_bucket']
         source_bucket = "bridge-transient-data-transfer-s3"
-        
+
         # Construct source_key using the same pattern as transfer_file_to_s3
         # Pattern: {source_case_title}_{job_id}/{dems_case_id}.zip
         folder_name = f"{source_case_title}_{job_id}"
@@ -211,7 +180,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         dest_bucket = ssm_parameters['edt_s3_bucket']
         # dest_bucket = "edt-maple-dems-s3-preprod-staging"
         dest_key = f"{dems_case_id}/{dems_case_id}.zip"
-
+        
         if not source_bucket or not dest_bucket:
             raise ValueError("Missing S3 bucket configuration in SSM parameters")
         
