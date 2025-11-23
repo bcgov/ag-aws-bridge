@@ -347,16 +347,54 @@ class DatabaseManager:
         query = "SELECT * FROM evidence_transfer_jobs WHERE job_id = %s"
         return self.execute_query_one(query, (job_id,))
     
-    def update_job_status(self, job_id: str, status_code: int, agency_id_code: str, agency_file_number : str,job_msg: str = None, 
-                         last_modified_process: str = None) -> Dict:
-        """Update job status."""
-        query = """
+    def update_job_status(self, job_id: str, status_code: int, job_msg: str = None, 
+                     last_modified_process: str = None, agency_id_code: str = None, 
+                     agency_file_number: str = None) -> Dict:
+        """
+        Update job status.
+        
+        Args:
+            job_id: The job identifier
+            status_code: Status code from StatusCodes
+            job_msg: Optional message about the status
+            last_modified_process: Optional process that modified the record
+            agency_id_code: Optional agency ID code (new parameter, backward compatible)
+            agency_file_number: Optional agency file number (new parameter, backward compatible)
+        
+        Returns:
+            Dict with updated record or error
+        """
+        
+        # Build dynamic query based on provided parameters
+        updates = ["job_status_code = %s", "last_modified_utc = NOW()"]
+        params = [status_code]
+        
+        if job_msg is not None:
+            updates.append("job_msg = %s")
+            params.append(job_msg)
+        
+        if last_modified_process is not None:
+            updates.append("last_modified_process = %s")
+            params.append(last_modified_process)
+        
+        if agency_id_code is not None:
+            updates.append("agency_id_code = %s")
+            params.append(agency_id_code)
+        
+        if agency_file_number is not None:
+            updates.append("agency_file_number = %s")
+            params.append(agency_file_number)
+        
+        params.append(job_id)
+        
+        query = f"""
             UPDATE evidence_transfer_jobs 
-            SET job_status_code = %s, job_msg = %s, last_modified_process = %s, last_modified_utc = NOW() , agency_id_code= %s, agency_file_number=%s
+            SET {', '.join(updates)}
             WHERE job_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (status_code, job_msg, last_modified_process, agency_id_code, agency_file_number, job_id), True)
+        
+        return self.execute_query_one(query, tuple(params), True)
     
     def update_job_counts(self, job_id: str, total: int = None, to_download: int = None, 
                          downloaded: int = None, last_modified_process: str = None) -> Dict:

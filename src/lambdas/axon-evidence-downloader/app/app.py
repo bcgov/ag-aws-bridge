@@ -167,8 +167,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         case_info = db_manager.get_source_case_information(job_id)
         if not case_info:
             raise ValueError(f"Invalid Case Information: {case_info}")
-        source_case_title = case_info.get('source_case_title', 'unknown_case')
-        source_case_id = case_info.get('source_case_id', 'unknown_id')
+        source_case_title = case_info.get('source_case_title')
+        if not source_case_title:
+            raise ValueError(f"Invalid source_case_title: {source_case_title}")
+        source_case_id = case_info.get('source_case_id')
+        if not source_case_id:
+            raise ValueError(f"Invalid source_case_id: {source_case_id}")
+        dems_case_id = case_info.get('dems_case_id')
+        if dems_case_id is None:
+            raise ValueError(f"Invalid DEMS Case ID: {dems_case_id}")
         
         transfer_result = transfer_file_to_s3(
             file_path, job_id, evidence_file_id, ssm_parameters, case_info
@@ -183,7 +190,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 context_data={
                     "job_id": job_id,
                     "source_case_title": source_case_title,
-                    "source_case_id": source_case_id
+                    "source_case_id": source_case_id,
+                    "dems_case_id": dems_case_id,
                 },
             )
         else:
@@ -442,13 +450,13 @@ def construct_evidence_metadata_url(
     return url
 
 
-def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -> str:
+def download_evidence_file(url: str, evidence_file_name: str, bearer_token: str) -> str:
     """
     Download an evidence file to Lambda's /tmp directory.
 
     Args:
         url: The complete URL to download the file from
-        evidence_file_id: The evidence file ID (used for filename)
+        evidence_file_name: The evidence file name (used for filename)
         bearer_token: bearer token
 
     Returns:
@@ -461,7 +469,7 @@ def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -
     headers = {"Authorization": f"Bearer {bearer_token}", "Accept": "*/*"}
 
     # Create filename and full path
-    filename = f"{evidence_file_id}"
+    filename = f"{evidence_file_name}"
     file_path = f"/tmp/{filename}"
 
     http = urllib3.PoolManager()
@@ -602,7 +610,7 @@ def transfer_file_to_s3(local_file_path: str, job_id: str, evidence_file_id: str
         job_id: The job ID
         evidence_file_id: The evidence file ID (used as filename)
         ssm_parameters: Dictionary containing S3 configuration
-        case_info: Dictionary containing source_case_title and source_case_id
+        case_info: Dictionary containing source_case_title, source_case_id and dems_case_id
     Returns:
         dict: Transfer result with success status and details
     """
@@ -627,11 +635,11 @@ def transfer_file_to_s3(local_file_path: str, job_id: str, evidence_file_id: str
             result['error'] = f'Could not retrieve case information for job_id: {job_id}'
             return result
         
-        source_case_title = case_info.get('source_case_title', 'unknown_case')
-        source_case_id = case_info.get('source_case_id', 'unknown_id')
+        source_case_title = case_info.get('source_case_title')
+        dems_case_id = case_info.get('dems_case_id')
         
         # 2. Create S3 folder structure and key
-        folder_name = f"{source_case_title}_{job_id}"
+        folder_name = f"{source_case_title}_{dems_case_id}_{job_id}"
         s3_key = f"{folder_name}/{evidence_file_id}"
         
         result['s3_location'] = f"s3://{s3_bucket}/{s3_key}"
