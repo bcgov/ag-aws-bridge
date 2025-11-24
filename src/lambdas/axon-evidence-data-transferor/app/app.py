@@ -176,9 +176,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Pattern: {{source_case_title}_{dems_case_id}_{job_id}.zip
         folder_name = f"{source_case_title}_{dems_case_id}_{job_id}"
         source_key = f"{folder_name}.zip"
-        
+        source_key = "210_25-250904_PDEMS_Integration_Files.zip"
+
         dest_bucket = ssm_parameters['edt_s3_bucket']
         dest_key = source_key
+        dest_key = f"PDEMS/210_25-250904_PDEMS_Integration_Files.zip"
         
         if not source_bucket or not dest_bucket:
             raise ValueError("Missing S3 bucket configuration in SSM parameters")
