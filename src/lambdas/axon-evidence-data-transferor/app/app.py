@@ -245,7 +245,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Queue success message with CSV path
         queue_success_message(
             job_id=job_id,
-            success_queue_url=ssm_parameters['success_queue_url'],
+            success_queue_url=ssm_parameters['dems_import_queue_url'],
             loadFilePath=transfer_result.get('load_file_path'),
             dems_case_id=dems_case_id
         )
