@@ -243,7 +243,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if not db_update_result['success']:
             raise RuntimeError(f"Database update failed: {db_update_result.get('error')}")
 
-        complete_load_file_path = f"{source_key}/{transfer_result.get('load_file_path')}"
+        complete_load_file_path = f"{edt_bucket_subfolder}/{source_key}/{transfer_result.get('load_file_path')}"
         # Queue success message with CSV path
         queue_success_message(
             job_id=job_id,
