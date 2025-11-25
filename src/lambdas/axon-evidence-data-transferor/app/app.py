@@ -180,7 +180,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         dest_bucket = ssm_parameters['edt_s3_bucket']
         # dest_key = source_key
-        dest_key = f"PDEMS/{source_key}"
+        edt_bucket_subfolder = ssm_parameters.get('edt_s3_bucket_subfolder', '').strip('/')
+        dest_key = f"{edt_bucket_subfolder}/{source_key}"
 
         if not source_bucket or not dest_bucket:
             raise ValueError("Missing S3 bucket configuration in SSM parameters")
@@ -242,11 +243,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if not db_update_result['success']:
             raise RuntimeError(f"Database update failed: {db_update_result.get('error')}")
 
+        complete_load_file_path = f"{source_key}/{transfer_result.get('load_file_path')}"
         # Queue success message with CSV path
         queue_success_message(
             job_id=job_id,
             success_queue_url=ssm_parameters['dems_import_queue_url'],
-            loadFilePath=transfer_result.get('load_file_path'),
+            loadFilePath=complete_load_file_path,
             dems_case_id=dems_case_id
         )
 
@@ -350,6 +352,7 @@ def get_ssm_parameters(
     # Define parameter paths
     parameter_paths = {
         "edt_s3_bucket": f"/{env_stage}/edt/s3/bucket",
+        "edt_s3_bucket_subfolder": "/{env_stage}/edt/s3/bucket-subfolder",
         "bridge_s3_bucket": f"/{env_stage}/bridge/s3/bridge-transient-data-transfer-s3",
         "dems_import_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-dems-import",
         "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
