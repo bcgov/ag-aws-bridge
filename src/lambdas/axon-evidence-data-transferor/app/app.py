@@ -355,7 +355,7 @@ def get_ssm_parameters(
         "edt_s3_bucket_subfolder": "/{env_stage}/edt/s3/bucket-subfolder",
         "bridge_s3_bucket": f"/{env_stage}/bridge/s3/bridge-transient-data-transfer-s3",
         "dems_import_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-dems-import",
-        "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
+        "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception"
     }
 
     parameters = {}
