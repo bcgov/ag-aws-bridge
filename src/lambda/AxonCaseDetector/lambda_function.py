@@ -62,7 +62,7 @@ def lambda_handler(event, context):
             f'/{env_stage}/axon/api/client_id',
             f'/{env_stage}/axon/api/agency_id',
             f'/{env_stage}/axon/api/case_detector_interval_mins',
-            f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found'
+            f'/{env_stage}/bridge/sqs-queues/url_q-axon-case-found'
         ]
         
         # Retrieve multiple parameters at once
@@ -175,7 +175,7 @@ def lambda_handler(event, context):
                 job_id = context.aws_request_id,
                 custom_metadata={"status_code": response.status, "url": api_url}
             )
-            queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found']
+            queue_url = parameters[f'/{env_stage}/bridge/sqs-queues/url_q-axon-case-found']
               # Optionally set queue attributes first (e.g., for KMS encryption) - run this only once or as needed
             try:
                 sqs.set_queue_attributes(
