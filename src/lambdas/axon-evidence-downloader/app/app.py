@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 import urllib3
@@ -102,6 +102,29 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if source_agency is None:
             raise ValueError(f"Invalid Source Agency: {source_agency}")
 
+        # Retrieve the actual filename from evidence metadata
+        evidence_file_name = get_evidence_file_name(
+            base_url=ssm_parameters["base_url"],
+            source_agency=source_agency,
+            evidence_id=evidence_id,
+            evidence_file_id=evidence_file_id,
+            bearer_token=ssm_parameters["bearer"]
+        )
+
+        if not evidence_file_name:
+            raise ValueError(f"Could not retrieve filename for evidence_file_id: {evidence_file_id}")
+
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="axon_evidence_downloader_filename_retrieved",
+            context_data={
+                "env_stage": env_stage,
+                "evidence_file_id": evidence_file_id,
+                "evidence_file_name": evidence_file_name,
+            },
+        )
 
         # Construct url
         base_url = ssm_parameters["base_url"]
@@ -121,9 +144,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         # Download file to /tmp
         bearer_token = ssm_parameters["bearer"]
-        file_path = download_evidence_file(
-            evidence_file_url, evidence_file_id, bearer_token
-        )
+        file_path = download_evidence_file(evidence_file_url, evidence_file_name, bearer_token)
 
         # Calculate checksum
         calculated_checksum = calculate_file_checksum(file_path)
@@ -146,8 +167,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         case_info = db_manager.get_source_case_information(job_id)
         if not case_info:
             raise ValueError(f"Invalid Case Information: {case_info}")
-        source_case_title = case_info.get('source_case_title', 'unknown_case')
-        source_case_id = case_info.get('source_case_id', 'unknown_id')
+        source_case_title = case_info.get('source_case_title')
+        if not source_case_title:
+            raise ValueError(f"Invalid source_case_title: {source_case_title}")
+        source_case_id = case_info.get('source_case_id')
+        if not source_case_id:
+            raise ValueError(f"Invalid source_case_id: {source_case_id}")
+        dems_case_id = case_info.get('dems_case_id')
+        if dems_case_id is None:
+            raise ValueError(f"Invalid DEMS Case ID: {dems_case_id}")
         
         transfer_result = transfer_file_to_s3(
             file_path, job_id, evidence_file_id, ssm_parameters, case_info
@@ -162,7 +190,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 context_data={
                     "job_id": job_id,
                     "source_case_title": source_case_title,
-                    "source_case_id": source_case_id
+                    "source_case_id": source_case_id,
+                    "dems_case_id": dems_case_id,
                 },
             )
         else:
@@ -190,6 +219,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             
             # Log 2: All files complete
             print(f"job: {job_id} [case evidence files downloaded successfully. expected = {count_to_download}; downloaded = {count_downloaded_tracked}]")
+            
+            # Queue success message
+            success_queue_url = ssm_parameters["evidence_metadata_queue_url"]
+            if queue_success_message(job_id, success_queue_url):
+                logger.log(
+                    event=event,
+                    level=LogLevel.INFO,
+                    status=LogStatus.SUCCESS,
+                    message="axon_evidence_downloader_queued_success",
+                    context_data={
+                        "env_stage": env_stage,
+                        "job_id": job_id,
+                        "queue_url": success_queue_url,
+                    },
+                )
+
         else:
             # Alternate-Path: One log message
             print(f"job: {job_id} [case evidence file downloaded successfully: evidenceId ({evidence_id}) fileId ({evidence_file_id}) expected = {count_to_download}; downloaded = {count_downloaded_tracked}]")
@@ -255,6 +300,7 @@ def get_ssm_parameters(
         "bearer": f"/{env_stage}/axon/api/bearer",
         "base_url": f"/{env_stage}/axon/api/base_url",
         "evidence_download_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download",
+        "evidence_metadata_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-metadata",
         "s3_bucket": f"/{env_stage}/edt/s3/bucket",
         "s3_role": f"/{env_stage}/edt/s3/iam/role_arn",
     }
@@ -384,14 +430,33 @@ def construct_evidence_file_url(
 
     return url
 
+def construct_evidence_metadata_url(
+    base_url: str, source_agency: str, evidence_id: str
+) -> str:
+    """
+    Construct the URL for accessing evidence metadata (v2 API).
 
-def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -> str:
+    Args:
+        base_url: Axon base URL
+        source_agency: The source agency GUID
+        evidence_id: The evidence ID GUID
+
+    Returns:
+        str: The constructed URL for evidence metadata
+    """
+    base_url = base_url.rstrip("/")
+    url = f"{base_url}/api/v2/agencies/{source_agency}/evidence/{evidence_id}"
+
+    return url
+
+
+def download_evidence_file(url: str, evidence_file_name: str, bearer_token: str) -> str:
     """
     Download an evidence file to Lambda's /tmp directory.
 
     Args:
         url: The complete URL to download the file from
-        evidence_file_id: The evidence file ID (used for filename)
+        evidence_file_name: The evidence file name (used for filename)
         bearer_token: bearer token
 
     Returns:
@@ -404,7 +469,7 @@ def download_evidence_file(url: str, evidence_file_id: str, bearer_token: str) -
     headers = {"Authorization": f"Bearer {bearer_token}", "Accept": "*/*"}
 
     # Create filename and full path
-    filename = f"{evidence_file_id}"
+    filename = f"{evidence_file_name}"
     file_path = f"/tmp/{filename}"
 
     http = urllib3.PoolManager()
@@ -545,7 +610,7 @@ def transfer_file_to_s3(local_file_path: str, job_id: str, evidence_file_id: str
         job_id: The job ID
         evidence_file_id: The evidence file ID (used as filename)
         ssm_parameters: Dictionary containing S3 configuration
-        case_info: Dictionary containing source_case_title and source_case_id
+        case_info: Dictionary containing source_case_title, source_case_id and dems_case_id
     Returns:
         dict: Transfer result with success status and details
     """
@@ -570,11 +635,11 @@ def transfer_file_to_s3(local_file_path: str, job_id: str, evidence_file_id: str
             result['error'] = f'Could not retrieve case information for job_id: {job_id}'
             return result
         
-        source_case_title = case_info.get('source_case_title', 'unknown_case')
-        source_case_id = case_info.get('source_case_id', 'unknown_id')
+        source_case_title = case_info.get('source_case_title')
+        dems_case_id = case_info.get('dems_case_id')
         
         # 2. Create S3 folder structure and key
-        folder_name = f"{source_case_title}_{job_id}"
+        folder_name = f"{source_case_title}_{dems_case_id}_{job_id}"
         s3_key = f"{folder_name}/{evidence_file_id}"
         
         result['s3_location'] = f"s3://{s3_bucket}/{s3_key}"
@@ -603,3 +668,120 @@ def transfer_file_to_s3(local_file_path: str, job_id: str, evidence_file_id: str
         result['error'] = error_msg
         print(error_msg)
         return result
+
+def queue_success_message(job_id: str, success_queue_url: str) -> bool:
+    """
+    Queue the job_id for the next lambda to pick up after all evidence files are downloaded.
+    
+    Args:
+        job_id: The job ID to queue
+        success_queue_url: The SQS queue URL to send the message to
+        
+    Returns:
+        bool: True if message was successfully queued, False otherwise
+    """
+    try:        
+        sqs_client = boto3.client('sqs', region_name='ca-central-1')
+
+        message_body = {
+            'job_id': job_id,
+        }
+        
+        message_attributes = {
+            'job_id': {
+                'StringValue': job_id,
+                'DataType': 'String'
+            },
+        }
+        
+        # Prepare message for FIFO queue
+        message_params = {
+            'QueueUrl': success_queue_url,
+            'MessageBody': json.dumps(message_body),
+            'MessageGroupId': f"job-{job_id}",
+            'MessageDeduplicationId': f"{job_id}-{int(time.time())}",
+            'MessageAttributes': message_attributes
+        }
+        
+        # Send message to queue
+        response = sqs_client.send_message(**message_params)
+        
+        message_id = response.get('MessageId')
+        print(f"Successfully queued message to success SQS queue. MessageId: {message_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error queuing message to success SQS queue: {str(e)}")
+        return False
+
+
+def get_evidence_file_name(
+    base_url: str,
+    source_agency: str,
+    evidence_id: str,
+    evidence_file_id: str,
+    bearer_token: str
+) -> Optional[str]:
+    """
+    Retrieve the original filename for an evidence file from Axon API.
+
+    Args:
+        base_url: Axon base URL
+        source_agency: The source agency GUID
+        evidence_id: The evidence ID GUID
+        evidence_file_id: The evidence file ID GUID to find
+        bearer_token: Bearer token for authentication
+
+    Returns:
+        str: The original filename if found, None otherwise
+
+    Raises:
+        Exception: If API request fails or response is invalid
+    """
+    # Construct the metadata URL
+    url = construct_evidence_metadata_url(base_url, source_agency, evidence_id)
+    
+    # Set up headers
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "Accept": "application/json"
+    }
+    
+    http = urllib3.PoolManager()
+    
+    try:
+        # Make the API request
+        response = http.request(
+            "GET",
+            url,
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status != 200:
+            raise Exception(f"HTTP {response.status}: {response.reason}")
+        
+        # Parse response
+        data = json.loads(response.data.decode('utf-8'))
+        
+        # Navigate to files array
+        files = data.get('data', {}).get('relationships', {}).get('files', {}).get('data', [])
+        
+        # Find the file with matching ID
+        for file_obj in files:
+            if file_obj.get('id') == evidence_file_id:
+                file_name = file_obj.get('attributes', {}).get('fileName')
+                if file_name:
+                    print(f"Found filename for evidence_file_id {evidence_file_id}: {file_name}")
+                    return file_name
+        
+        # If we get here, file ID was not found
+        print(f"Warning: evidence_file_id {evidence_file_id} not found in evidence {evidence_id}")
+        return None
+        
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse JSON response from {url}: {str(e)}")
+        raise
+    except Exception as e:
+        print(f"Failed to retrieve evidence metadata from {url}: {str(e)}")
+        raise
