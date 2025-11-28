@@ -176,7 +176,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Pattern: {{source_case_title}_{dems_case_id}_{job_id}.zip
         folder_name = f"{source_case_title}_{dems_case_id}_{job_id}"
         source_key = f"{folder_name}.zip"
-        # source_key = "210_25-250904_PDEMS_Integration_Files.zip"
+        source_key = "PO-2025-99008_5271_d9281a42-5d0f-4ced-8bbf-357adb7de364.zip"
 
         dest_bucket = ssm_parameters['edt_s3_bucket']
         # dest_key = source_key
