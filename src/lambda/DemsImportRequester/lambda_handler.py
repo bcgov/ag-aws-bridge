@@ -158,7 +158,7 @@ class DemsImportRequester:
     def callEDTDemsApi( self, job_id, dems_case_id, imagePath)->str:
         import_id = None
         try:
-            api_url = self.parameters[f'/{self.env_stage}/edt/api/import_url']+"cases/{dems_case_id}/create-loadfile-report"
+            api_url = self.parameters[f'/{self.env_stage}/edt/api/import_url']+"cases/{dems_case_id}/create-loadfile-import"
             headers = {
             'Authorization': f"Bearer {self.parameters[f'/{self.env_stage}/edt/api/bearer']}",
             "Accept" : "application/json"
@@ -200,54 +200,13 @@ class DemsImportRequester:
             if not json_data:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
                 raise
-                
-            
-            
+
             return import_id
 
         except Exception as e:
             error_msg = f"EDTDEMS API lookup failed for job_id: {job_id} or importname: {importName}. Error: {str(e)}"
             self.logger.log_error(event="EDTDEMS API lookup Failed", error=error_msg, job_id=self.job_id)
             raise
-            
-          
-
-    
-
-    def lookup_agency_code(self, rms_jur_id: str, cadJurId: str) -> tuple:
-        """Lookup agency code in DynamoDB."""
-        self.logger.log(event="Agency Code Lookup", status=LogStatus.IN_PROGRESS, message="Retrieving agency code for rmsJurId : " + rms_jur_id, job_id=self.job_id)
-    
-        item = None
-        try:
-            # First attempt with rms_jur_id
-            dynamo_response = self.agency_code_table.get_item(Key={'rmsJurId': rms_jur_id})
-            item = dynamo_response.get('Item')
-        
-            if not item:
-                # Try again with cadJurId
-                if cadJurId:
-                    dynamo_response = self.agency_code_table.get_item(Key={'cadJurId': cadJurId})
-                    item = dynamo_response.get('Item')
-                    
-                if not item:
-                    self.logger.log_error(event="Agency Code Lookup Failed", error=f"No item found for rmsJurId : {rms_jur_id} or cadJurid: {cadJurId} ", job_id=self.job_id)
-                    return None, None, None
-           
-            # Item found (via either key); log success
-            self.logger.log(event="Axon Case Agency Lookup", status=LogStatus.IN_PROGRESS, message=f"Agency prefix lookup successful", job_id=self.job_id)
-        
-            # Return extracted values
-            return (
-                item.get('bcpsAgencyIdCode', ''),
-                item.get('subAgencyYN', 'N'),
-                item.get('subAgencies', [])
-            )
-    
-        except Exception as e:  # Broad catch for any DynamoDB-related errors (e.g., ClientError, NoCredentialsError)
-            error_msg = f"DynamoDB lookup failed for rmsJurId: {rms_jur_id} or cadJurId: {cadJurId}. Error: {str(e)}"
-            self.logger.log_error(event="Agency Code Lookup Failed", error=error_msg, job_id=self.job_id)
-            return None, None, None
 
     def call_dems_api(self, dems_api_url: str, bearer_token: str, agency_code: str,
                       agency_file_number: str) -> tuple:
@@ -334,7 +293,6 @@ class DemsImportRequester:
                     'StringValue': str(custom_exception)[:256]  # SQS message attributes have a 256-byte limit
                 }
           
-
             response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
@@ -353,7 +311,7 @@ class DemsImportRequester:
                     "level": "INFO",
                     "function": Constants.PROCESS_NAME,
                     "event": "SQSMessageQueued",
-                    "message": "Queued message for Axon Case Detail and Evidence Filter",
+                    "message": "Queued message for DEMS Import EDT Requester",
                     "job_id": job_id,
                     "dems_import_job_id": dems_import_job_id,
                     "additional_info": {
@@ -540,7 +498,7 @@ def lambda_handler(event, context):
             return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'No messages to process'}
         
         logger.log_success(
-            event="Dems Importer End",
+            event="Dems Import Requester End",
             message="Successfully completed " + Constants.PROCESS_NAME + " execution",
             job_id=context.aws_request_id
         )
