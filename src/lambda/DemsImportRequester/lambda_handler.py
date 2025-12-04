@@ -2,6 +2,7 @@ import json
 from typing import List, Optional, Tuple
 import boto3
 import urllib3
+from urllib3.exceptions import MaxRetryError, NewConnectionError, TimeoutError
 import os
 import time
 import botocore.exceptions
@@ -167,34 +168,41 @@ class DemsImportRequester:
                 "importName": importName,
                 "loadFilePath": imagePath,
                 "importTemplate": template
-            }   
-            start_time = time.perf_counter()
-            api_response = self.http.request('POST', api_url, headers=headers, body=body)
-            response_time = time.perf_counter() - start_time
-
-            api_response.raise_for_status()
-
-            self.logger.log_api_call(
-            event="DEMS EDT create Import Report API call",
-            url=api_url,
-            method="POST",
-            status_code=api_response.status,
-            response_time=response_time,
-            job_id=self.job_id
-            )
-
+            }  
             try:
-                json_data = api_response.json()
-                import_id =  json_data.get("importId")
+                start_time = time.perf_counter()
+                api_response = self.http.request('POST', api_url, headers=headers, body=body)
+                response_time = time.perf_counter() - start_time
+            except (MaxRetryError, NewConnectionError, TimeoutError) as e:
+                self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"EDT API call failed, Exception: {str(e)}"))
+                return None
+
+            if api_response.status < 400:
+
+                self.logger.log_api_call(
+                event="DEMS EDT create Import Report API call",
+                url=api_url,
+                method="POST",
+                status_code=api_response.status,
+                response_time=response_time,
+                job_id=self.job_id
+                )
+
+                try:
+                    json_data = api_response.json()
+                    import_id =  json_data.get("importId")
                 
           
-            except ValueError as e:
-                self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Failed to parse JSON response: {str(e)}"))
-                raise
+                except ValueError as e:
+                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Failed to parse JSON response: {str(e)}"))
+                    raise
+            elif api_response.status >= 400:
+                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
+                 return None
             
             if not json_data:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
-                raise
+                return
 
             return import_id
 
@@ -372,15 +380,15 @@ class DemsImportRequester:
                 if import_id: 
                     self.update_evidence_files_import_requested(str(Constants.IMPORT_REQUESTED),job_id)
             except Exception as fileUpdateX:
-                self.logger.log_error(event="Update Evidence Files", message="Evidence Files Update Failed for Message ID:" + messageId, error=str(e), job_id=self.job_id)
+                self.logger.log_error(event="Update Evidence Files", message="Evidence Files Update Failed for Message ID:" + messageId, error=str(fileUpdateX), job_id=self.job_id)
                 return
 
             # Update job status
             try:
                 if import_id:
                     self.update_job_status(str(Constants.IMPORT_REQUESTED),job_id)
-            except Exception as fileUpdateX:
-                self.logger.log_error(event="Update Job Status", message="Job Status Update Failed for Message ID:" + messageId, error=str(e), job_id=self.job_id)
+            except Exception as fileUpdate:
+                self.logger.log_error(event="Update Job Status", message="Job Status Update Failed for Message ID:" + messageId, error=str(fileUpdate), job_id=self.job_id)
                 return
 
            # send sqs message 
@@ -414,9 +422,11 @@ class DemsImportRequester:
             
             except Exception as e:
                 self.logger.log_error(event="SQS Message Delete", message="SQS Message Delete Failed for Message ID:" + messageId, error=str(e), job_id=self.job_id)
+                raise
                      
         except Exception as msg_err:
             self.logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=self.job_id)
+            raise
 
 
 def lambda_handler(event, context):
