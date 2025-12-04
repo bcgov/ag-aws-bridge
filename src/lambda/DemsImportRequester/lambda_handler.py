@@ -2,14 +2,13 @@ import json
 from typing import List, Optional, Tuple
 import boto3
 import urllib3
-import urllib.parse
 import os
 import time
 import botocore.exceptions
 import random
 import string
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from botocore.config import Config
 
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
@@ -113,52 +112,48 @@ class DemsImportRequester:
 
     @staticmethod
     def parse_message_attributes(message: dict) -> tuple:
-        """Parse job_id, dems_case_id, loadFilePath from SQS message attributes."""
-        body = message.get('messageAttributes', {})
-       
-        job_id = None
-        loadFilePath = None
-        dems_case_id = None
-        loadFilePathBridgePath = None
+        """Parse required fields from SQS message attributes with case-insensitive lookup."""
+        attrs = message.get('messageAttributes', {})
 
-        if 'job_id' in body:
-            attr = body['job_id']
-            if attr['dataType'] == 'String':
-                job_id = attr['stringValue']
-            elif attr['dataType'] == 'Binary':
-                job_id = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
-       
-        if 'loadFilePath' in body:
-            attr = body['loadFilePath']
-            if attr['dataType'] == 'String':
-                loadFilePath = attr['stringValue']
-            elif attr['dataType'] == 'Binary':
-                loadFilePath = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
+        def get_attr(name):
+        # Try exact match first
+            if name in attrs:
+                val = attrs[name]
+            else:
+                # Try case-insensitive fallback
+                lower_name = name.lower()
+                for key, val in attrs.items():
+                    if key.lower() == lower_name:
+                        return val.get('stringValue') or val.get('binaryValue')
+                return None
+        
+            return val.get('stringValue') or val.get('binaryValue')
 
-        
-        if 'dems_case_id' in body:
-            attr = body['dems_case_id']
-            if attr['dataType'] == 'String':
-                dems_case_id = attr['stringValue']
-            elif attr['dataType'] == 'Binary':
-                dems_case_id = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
+        job_id = get_attr('job_id')
+        sourcePath = get_attr('sourcePath') or get_attr('SourcePath') or get_attr('source_path')
+        dems_case_id = get_attr('dems_case_id')
+        destinationPath = get_attr('destinationPath') or get_attr('DestinationPath')
 
-        if 'loadFilePathBridgePath' in body:
-            attr = body['loadFilePathBridgePath']
-            if attr['dataType'] == 'String':
-                loadFilePathBridgePath = attr['stringValue']
-            elif attr['dataType'] == 'Binary':
-                loadFilePathBridgePath = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
-        
-        if not job_id or not loadFilePath or not dems_case_id or loadFilePathBridgePath  :
-            raise ValueError("Missing job_id or loadFilePath or dems_case_id or loadFilePathBridgePath in messsage")
-        
-        return job_id, loadFilePath, dems_case_id,loadFilePathBridgePath
+        required = {
+            "job_id": job_id,
+            "sourcePath": sourcePath,
+            "dems_case_id": dems_case_id,
+            "destinationPath": destinationPath,
+        }
+
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            
+            raise ValueError(f"Missing required field(s): {', '.join(missing)}")
+
+        return job_id, sourcePath, dems_case_id, destinationPath
 
     def callEDTDemsApi( self, job_id, dems_case_id, imagePath)->str:
         import_id = None
         try:
-            api_url = self.parameters[f'/{self.env_stage}/edt/api/import_url']+"cases/{dems_case_id}/create-loadfile-import"
+            api_url = self.parameters[f'/{self.env_stage}/edt/api/import_url']
+            api_url = api_url.replace("$$$$", dems_case_id)
+           
             headers = {
             'Authorization': f"Bearer {self.parameters[f'/{self.env_stage}/edt/api/bearer']}",
             "Accept" : "application/json"
@@ -167,7 +162,7 @@ class DemsImportRequester:
             now = datetime.now()
 
             importName = "bridge_" + now.strftime("%Y-%m-%d-%H-%M-%S") + "_" + job_id
-            template= self.parameters['/{self.env_stage}/edt/api/import_template']
+            template= self.parameters[f'/{self.env_stage}/edt/api/import_template']
             body = {
                 "importName": importName,
                 "loadFilePath": imagePath,
@@ -180,7 +175,7 @@ class DemsImportRequester:
             api_response.raise_for_status()
 
             self.logger.log_api_call(
-            event="DEMS EDT create report",
+            event="DEMS EDT create Import Report API call",
             url=api_url,
             method="POST",
             status_code=api_response.status,
@@ -268,7 +263,7 @@ class DemsImportRequester:
                         self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
 
     def send_sqs_message(self, queue_url: str, job_id: str, dems_case_id: str, dems_import_job_id:str,
-                         current_timestamp: str,loadFilePathBridgePath:str, custom_exception: Exception = None):
+                         current_timestamp: str,sourcePath:str, custom_exception: Exception = None):
         """Send message to SQS queue."""
         # Define the alphanumeric character pool
         alphanumeric_chars = string.ascii_letters + string.digits
@@ -284,7 +279,7 @@ class DemsImportRequester:
                 'Job_id': {'DataType': 'String', 'StringValue': job_id},
                 'dems_case_id': {'DataType': 'String', 'StringValue': dems_case_id},
                 'dems_import_job_id' : {'DataType': 'String', 'StringValue': dems_import_job_id},
-                'loadFilePathBridge' : {'DataType': 'String', 'StringValue': loadFilePathBridgePath }
+                'sourcePath' : {'DataType': 'String', 'StringValue': sourcePath }
             }
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
@@ -329,12 +324,16 @@ class DemsImportRequester:
         try:
             self.parse_message_attributes(message)
 
-            job_id = "", dems_case_id="", file_path="", import_id="", loadFilePathBridgePath=""
+            job_id = ""
+            dems_case_id=""
+            destinationPath=""
+            import_id=""
+            sourcePath=""
             
-            receipt_handle = message['ReceiptHandle']
-            messageId = message["MessageId"]
+            receipt_handle = message['receiptHandle']
+            messageId = message["messageId"]
             try:
-                 job_id, dems_case_id, file_path, loadFilePathBridgePath = self.parse_message_attributes(message)
+                job_id, sourcePath, dems_case_id,destinationPath = self.parse_message_attributes(message)
                  
             except Exception as e:
                 self.logger.log_error(
@@ -346,7 +345,7 @@ class DemsImportRequester:
                 )
                 return  # Abort processing early
 
-            if not all([job_id, dems_case_id, file_path]):
+            if not all([job_id, dems_case_id, destinationPath,sourcePath]):
                 self.logger.log_error(
                 event="Invalid Message Data",
                 message="Missing required fields after parsing",
@@ -358,14 +357,14 @@ class DemsImportRequester:
             import_id: Optional[str] = None
             
             try:
-                import_id = self.callEDTDemsApi(job_id, dems_case_id=dems_case_id, imagePath=file_path )
+                import_id = self.callEDTDemsApi(job_id, dems_case_id=dems_case_id, imagePath=sourcePath )
             except Exception as mImportIdEx:
                  self.logger.log(
                     event="EDT Dems Import Requester",
                     status=LogStatus.WARNING,
                     message="API called but no import_id returned",
                     job_id=job_id,
-                    custom_metadata={"dems_case_id": dems_case_id, "import_file_path": file_path}
+                    custom_metadata={"dems_case_id": dems_case_id, "import_file_path": sourcePath}
                     )
 
             try:
@@ -389,7 +388,7 @@ class DemsImportRequester:
                 if import_id:
                     queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status']
                     current_timestamp = datetime.now()
-                    self.send_sqs_message(queue_url, job_id, dems_case_id=dems_case_id, dems_import_job_id=import_id, loadFilePathBridgePath=loadFilePathBridgePath,
+                    self.send_sqs_message(queue_url, job_id, dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath=sourcePath,
                                            current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
             except Exception as sqs_exception:
                 self.logger.log_error(event="SQS Message Sending Failed", error=str(msg_err), job_id=self.job_id)
@@ -408,7 +407,7 @@ class DemsImportRequester:
                     job_id=job_id,
                     custom_metadata={
                      "dems_case_id": dems_case_id,
-                     "import_file_path": file_path,
+                     "import_file_path": sourcePath,
                      "import_id": import_id
                     }
                 )
@@ -422,88 +421,71 @@ class DemsImportRequester:
 
 def lambda_handler(event, context):
     """Main Lambda handler function."""
-    # Get environment stage from environment variable
     env_stage = os.environ.get('ENV_STAGE', 'dev-test')
-
     logger = LambdaStructuredLogger()
-    logger.log_start(event="Verify Dems Case Start", job_id=context.aws_request_id)
+    logger.log_start(event="DEMS Import Requester Start", job_id=context.aws_request_id)
     
     try:
         requester = DemsImportRequester(env_stage, logger, context.aws_request_id)
-      
+
         if not event.get("Records"):
-            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No records found in event"))
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'No records found in event'})
-            }
+            logger.log(event="SQS Poll", status=Constants.IN_PROGRESS, 
+                       message="No messages in queue", job_id=context.aws_request_id)
+            return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'No messages to process'}
 
         for record in event["Records"]:
-            message_attributes = record.get('messageAttributes', {})
-           
-            job_id = None
-
-            if 'job_id' in message_attributes:
-                attr = message_attributes['job_id']
-                job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
+            attrs = record.get('messageAttributes', {})
             
+            # DEBUG: Remove this after confirming it works
+            #print("messageAttributes keys:", list(attrs.keys()))
 
-            if not job_id :
-                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id is required"))
+            # Helper to safely extract string value
+            def get_value(key):
+                attr = attrs.get(key)
+                if not attr:
+                    return None
+                return attr.get('stringValue') or attr.get('binaryValue')
+
+            job_id = get_value('job_id')
+            sourcePath = get_value('sourcePath')          # ← FIXED: no space!
+            dems_case_id = get_value('dems_case_id')
+            destinationPath = get_value('destinationPath') # ← also ensure no typo here
+
+            # Validate all required fields
+            missing = []
+            if not job_id:          missing.append('job_id')
+            if not sourcePath:      missing.append('sourcePath')
+            if not dems_case_id:    missing.append('dems_case_id')
+            if not destinationPath: missing.append('destinationPath')
+
+            if missing:
+                error_msg = f"Missing required message attributes: {', '.join(missing)}"
+                logger.log_error(event=Constants.PROCESS_NAME, error=Exception(error_msg), job_id=job_id or "unknown")
                 return {
                     'statusCode': 400,
                     'body': json.dumps({
-                        'error': 'job_id and source_case_id are required',
-                        'received_event': event
-                    })
-                }
-            loadFilePath = None
-            if 'loadFilePath' in message_attributes:
-                attr = message_attributes['loadFilePath']
-                loadFilePath = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
-            
-
-            if not loadFilePath :
-                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("loadFilePath is required"))
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps({
-                        'error': 'job_id and loadFilePath are required',
-                        'received_event': event
+                        'error': error_msg,
+                        'available_attributes': list(attrs.keys()),
+                        'received_event_sample': record  # safe for debugging
                     })
                 }
 
-            dems_case_id = None
-            if 'dems_case_id' in message_attributes:
-                attr = message_attributes['dems_case_id']
-                dems_case_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
-            
+            logger.log_success(
+                event=Constants.PROCESS_NAME,
+                message=f"Processing job_id: {job_id}, source: {sourcePath}",
+                job_id=job_id
+            )
 
-            if not dems_case_id :
-                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("dems_case_id is required"))
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps({
-                        'error': 'job_id and loadFilePath and dems_case_id are required',
-                        'received_event': event
-                    })
-                }
-
-            logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id},  environment: {env_stage}", job_id=job_id)
+            # Pass the full record (or just the values) to your processor
             requester.process_message(record)
 
-        
-        if not event["Records"]:
-            logger.log(event="SQS Poll", status=Constants.IN_PROGRESS, message="No messages in queue", job_id=context.aws_request_id)
-            return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'No messages to process'}
-        
         logger.log_success(
             event="Dems Import Requester End",
-            message="Successfully completed " + Constants.PROCESS_NAME + " execution",
+            message="Successfully completed execution",
             job_id=context.aws_request_id
         )
         return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'Processing complete'}
-    
+
     except Exception as e:
-        logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=context.aws_request_id)
+        logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=getattr(context, 'aws_request_id', 'unknown'))
         raise
