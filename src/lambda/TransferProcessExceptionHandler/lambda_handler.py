@@ -18,6 +18,7 @@ from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manage
 
 class Constants:
     IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
     ERROR = "ERROR",
     PROCESS_NAME = "demsImportRequester"
     REGION_NAME = "ca-central-1"
@@ -251,7 +252,7 @@ class TransferProcessExceptionHandler:
         
         return api_response.status, api_response.data.decode('utf-8').strip()
 
-    def update_job_status(self, job_id: str, status_value: str, agency_id_code:str, agency_file_number:str):
+    def update_job_status(self, job_id: str, status_value: str, last_process_mod:str):
         """Update job status in the database."""
         update_job_status = self.db_manager.get_status_code_by_value(value=status_value)
         if update_job_status:
@@ -259,11 +260,11 @@ class TransferProcessExceptionHandler:
             self.db_manager.update_job_status(
                 job_id=job_id,
                 status_code=status_identifier,
-                job_msg="Called dems edt import requester",
-                last_modified_process="lambda: dems import requester"
+                job_msg=last_process_mod,
+                last_modified_process=last_process_mod
             )
 
-    def update_evidence_files_import_requested(self, status:str, job_id:str):
+    def update_evidence_files_import_requested(self, status:str, job_id:str, last_modified_process:str):
         """Update job status in the database."""
         update_job_status = self.db_manager.get_status_code_by_value(value=status)
         file_status_updates_tuple : List[Tuple[str,int]]  # define a list of Tuples<evidence_id, status_code> to update
@@ -278,7 +279,7 @@ class TransferProcessExceptionHandler:
                     except KeyError as e:
                         self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
 
-                    return_values = self.db_manager.bulk_update_evidence_file_states(file_status_updates_tuple)
+                    return_values = self.db_manager.bulk_update_evidence_file_states(file_status_updates_tuple,last_modified_process)
                     if return_values['success']:
                         self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Updated evidence files for job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
                     else:
@@ -352,6 +353,9 @@ class TransferProcessExceptionHandler:
         queue_name_only = parts[5]
 
         return queue_name_only
+    
+    def process_exception_queue_message(self, message:dict):
+        print("test")
 
     def process_success_queue_message(self, message:dict):
         receipt_handle = message['receiptHandle']
@@ -390,13 +394,25 @@ class TransferProcessExceptionHandler:
                 for key,value  in flags.items():
                     if value:
                         if key == Constants.NOTIFY_SOURCE_AGENCY:
-                            self.sendSourceAgency(job_id)
+                            returnEmail = self.sendSourceAgency(job_id)
+                            
                         elif key == Constants.NOTIFY_BCPS:
                             destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_bcps_on_complete"]
-                            self.sendEmail(job_id, destination_email=destination)
+                            returnEmail = self.sendEmail(job_id, destination_email=destination)
                         elif key == Constants.NOTIFY_SYS_ADMIN:
                              destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_sysadmin_address"]
-                             self.sendEmail(job_id, destination_email= destination)
+                             returnEmail = self.sendEmail(job_id, destination_email= destination)
+                            
+                if returnEmail:
+                     self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent email successfully for  job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
+                
+                self.update_evidence_files_import_requested(Constants.COMPLETED, job_id,   last_modified_process= "lambda: transfer process notifier")
+                self.update_job_status(job_id,Constants.COMPLETED,"lambda: transfer process notifier")
+
+                 # delete message
+                success_queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import']
+              
+                self.sqs_client.delete_message(QueueUrl = success_queue_url, ReceiptHandle=receipt_handle)
 
         except Exception as e:
                 self.logger.log_error(
@@ -410,7 +426,58 @@ class TransferProcessExceptionHandler:
 
     def sendEmail(self, job_id:str, destination_email:str, source_email:str)->bool:
         try:
-                print("test")
+               
+               if job_id:
+                evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
+                current_timestamp = datetime.now()
+                if evidence_transfer_job:
+                    subject_text = "Axon Agency to BCPS DEMS Case Share - Completed -" + evidence_transfer_job["source_case_title"]
+                    body_text = f"""The following Axon to BCPS DEMS Case Share has completed successfully: - Source Case Title ={evidence_transfer_job["source_case_title"]}
+                                - Shared On = {evidence_transfer_job["source_case_last_modified_utc"]}
+                                - Completed On = {current_timestamp.strftime("%Y-%m-%d %H:%M:%S")}
+                                - Evidence File Count (received) = {evidence_transfer_job["source_case_evidence_count_to_download"]}
+                                - Evidence File Count (transferred) = {evidence_transfer_job["source_case_evidence_count_downloaded"]}
+                                - BCPS DEMS Case ID = {evidence_transfer_job["dems_case_id"]}
+                                - BCPS (JUSTIN) Agency ID Code = {evidence_transfer_job["agency_id_code"]}
+                                - BCPS (JUSTIN) Agency File Number = {evidence_transfer_job["agency_file_number"]}"""
+                    
+                    html_body_text = f"""<p>The following Axon to BCPS DEMS Case Share has completed successfully:</p>
+                                    <ul>
+                                        <li>Source Case Title = {evidence_transfer_job["source_case_title"]}</li>
+                                        <li>Shared On = {evidence_transfer_job["source_case_last_modified_utc"]}</li>
+                                        <li>Completed On = {current_timestamp.strftime("%Y-%m-%d %H:%M:%S")}</li>
+                                        <li>Evidence File Count (received) = {evidence_transfer_job["source_case_evidence_count_to_download"]}</li>
+                                        <li>Evidence File Count (transferred) = {evidence_transfer_job["source_case_evidence_count_downloaded"]}</li>
+                                        <li>BCPS DEMS Case ID = {evidence_transfer_job["dems_case_id"]}</li>
+                                        <li>BCPS (JUSTIN) Agency ID Code = {evidence_transfer_job["agency_id_code"]}</li>
+                                        <li>BCPS (JUSTIN) Agency File Number = {evidence_transfer_job["agency_file_number"]}</li>
+                                    </ul>"""
+
+
+                    response = self.email_client.send_email( 
+                        Source=source_email,  # Must be verified
+                        Destination={'ToAddresses': [destination_email]},
+                        Message={
+                        'Subject': {'Data': subject_text},
+                        'Body': {
+                        'Text': {'Data': body_text},
+                        'Html': {'Data': html_body_text} if html_body_text else None
+                            }
+                        }
+                        )
+                    if response:
+                        try:
+                            if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                                return True
+                        except Exception as emailError:
+                            self.logger.log_error(
+                            event="Sending email failed.",
+                            message=f"Failed to send email for : {job_id}",
+                            error=str(emailError),
+                            job_id=job_id,
+                            message_id="unknown"
+                            )
+                        return False  # Abort processing early
         except Exception as e:
                 self.logger.log_error(
                 event="Sending email failed.",
@@ -419,12 +486,13 @@ class TransferProcessExceptionHandler:
                 job_id=job_id,
                 message_id="unknown"
                 )
-                return  # Abort processing early
+                return False # Abort processing early
 
     def sendSourceAgency(self, job_id:str)->bool:
             try:
                 source_email_address = self.parameters[f"/{self.env_stage}/bridge/notifications/from_address"]
-                destination_email = ""
+                destination_email = None
+                return_value = False
                 evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
                 if evidence_transfer_job:
                     agency_code = evidence_transfer_job["bcpsAgencyIdCode"]
@@ -435,17 +503,20 @@ class TransferProcessExceptionHandler:
                             destination_email = item.get('notificationAddress')
                     
                 if destination_email:
-                    self.sendEmail(job_id=job_id,destination_email=destination_email, source_email=source_email_address) 
-                print("test")
+                    return_value = self.sendEmail(job_id=job_id,destination_email=destination_email, source_email=source_email_address) 
+                    
+                return return_value
+
+               
             except Exception as e:
                 self.logger.log_error(
-                event="Message Parsing Failed",
-                message=f"Failed to parse message attributes for MessageId: {job_id}",
+                event="Sending Agency Email Failed",
+                message=f"Failed to send email for JobId: {job_id}",
                 error=str(e),
                 job_id=job_id,
                 message_id="unknown"
                 )
-                return  # Abort processing early
+                return return_value # Abort processing early
               
 
     def detectNotifyCompleteValues(self)->dict:
@@ -593,50 +664,13 @@ def lambda_handler(event, context):
             queue_name = requester.get_sqs_queue_calling(queue_arn)
 
             if queue_name == Constants.SUCCESS_TRANSFER_QUEUE_NAME:
-                print ("success queue")
+                requester.process_success_queue_message(record)
+                
             elif queue_name == Constants.TRANSFER_EXCEPTION_QUEUE_NAME:
                 print("transfer exception")
            
-            """ # Helper to safely extract string value
-            def get_value(key):
-                attr = attrs.get(key)
-                if not attr:
-                    return None
-                return attr.get('stringValue') or attr.get('binaryValue')
-
-            job_id = get_value('job_id')
-            sourcePath = get_value('sourcePath')          # ← FIXED: no space!
-            dems_case_id = get_value('dems_case_id')
-            destinationPath = get_value('destinationPath') # ← also ensure no typo here
-
-            # Validate all required fields
-            missing = []
-            if not job_id:          missing.append('job_id')
-            if not sourcePath:      missing.append('sourcePath')
-            if not dems_case_id:    missing.append('dems_case_id')
-            if not destinationPath: missing.append('destinationPath')
-
-            if missing:
-                error_msg = f"Missing required message attributes: {', '.join(missing)}"
-                logger.log_error(event=Constants.PROCESS_NAME, error=Exception(error_msg), job_id=job_id or "unknown")
-                return {
-                    'statusCode': 400,
-                    'body': json.dumps({
-                        'error': error_msg,
-                        'available_attributes': list(attrs.keys()),
-                        'received_event_sample': record  # safe for debugging
-                    })
-                }
-
-            logger.log_success(
-                event=Constants.PROCESS_NAME,
-                message=f"Processing job_id: {job_id}, source: {sourcePath}",
-                job_id=job_id
-            )
- """
-            # Pass the full record (or just the values) to your processor
-            requester.process_message(record)
-
+          
+           
         logger.log_success(
             event="Dems Import Requester End",
             message="Successfully completed execution",
