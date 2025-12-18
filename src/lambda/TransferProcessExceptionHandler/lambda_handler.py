@@ -69,9 +69,6 @@ class TransferProcessExceptionHandler:
     def _get_ssm_parameters(self) -> dict:
         """Retrieve and process SSM parameters."""
         parameter_names = [
-          
-            f'/{self.env_stage}/edt/api/import_url',
-            f'/{self.env_stage}/axon/api/client_id',
             f'/{self.env_stage}/bridge/notifications/notify_source_on_complete',
             f"/{self.env_stage}/bridge/notifications/notify_bcps_on_complete",
             f"/{self.env_stage}/bridge/notifications/notify_sysadmin_on_complete",
@@ -82,21 +79,26 @@ class TransferProcessExceptionHandler:
             f"/{self.env_stage}/bridge/notifications/from_address",
             f"/{self.env_stage}/bridge/notifications/notify_sysadmin_address",
             f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception',
-            f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import',
-            f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status',
+            f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'
         ]
         
         try:
-            ssm_response = self.ssm_client.get_parameters(Names=parameter_names, WithDecryption=True)
-            parameters = {param['Name']: param['Value'] for param in ssm_response['Parameters']}
-            
-            if ssm_response.get('InvalidParameters'):
-                self.logger.log_error(
-                    event="SSM Param Retrieval",
-                    error=f"Failed to retrieve parameters: {ssm_response['InvalidParameters']}",
-                    job_id=self.job_id
-                )
-                raise ValueError(f"Failed to retrieve some parameters: {ssm_response['InvalidParameters']}")
+
+            parameters = {}
+            batch_size = 10
+            for i in range(0, len(parameter_names), batch_size):
+                batch = parameter_names[i:i + batch_size]
+                ssm_response = self.ssm_client.get_parameters(Names=batch, WithDecryption=True)
+        
+           
+           # Only raise if there are actual invalid parameters
+            if 'InvalidParameters' in ssm_response and len(ssm_response['InvalidParameters']) > 0:
+                raise ValueError(f"Invalid parameters: {ssm_response['InvalidParameters']}")
+        
+            for param in ssm_response['Parameters']:
+                parameters[param['Name']] = param['Value']
+                #ssm_response = self.ssm_client.get_parameters(Names=parameter_names, WithDecryption=True)
+                parameters = {param['Name']: param['Value'] for param in ssm_response['Parameters']}
             
             self.logger.log_success(
                 event="SSM Param Retrieval",
@@ -416,7 +418,7 @@ class TransferProcessExceptionHandler:
         if not fileStatus or not job_id :
             return 0
         
-        queryStr = f'\select count(evidence_id) as file_count from evidence_files where evidence_transfer_state_code=(select identifier from status_codes where value=%s) and job_id=%s'
+        queryStr = f'select count(evidence_id) as file_count from evidence_files where evidence_transfer_state_code=(select identifier from status_codes where value=%s) and job_id=%s'
         params = {  fileStatus,job_id}   
         try:
             queryResults = self.db_manager.execute_query(queryStr, params)
