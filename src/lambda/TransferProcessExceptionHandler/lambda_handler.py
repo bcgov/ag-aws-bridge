@@ -26,8 +26,8 @@ class Constants:
     NOTIFICATION_MATRIX = "notification-distribution"
     HTTP_OK_CODE = 200,
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
-    SUCCESS_TRANSFER_QUEUE_NAME = ""
-    TRANSFER_EXCEPTION_QUEUE_NAME = ""
+    SUCCESS_TRANSFER_QUEUE_NAME = "q-axon-transfer-completion.fifo"
+    TRANSFER_EXCEPTION_QUEUE_NAME = "q-transfer-exception.fifo"
     NOTIFY_SOURCE_AGENCY = "notify_source_on_complete"
     NOTIFY_BCPS = "notify_bcps_on_complete"
     NOTIFY_SYS_ADMIN = "notify_sysadmin_on_complete"
@@ -69,48 +69,43 @@ class TransferProcessExceptionHandler:
     def _get_ssm_parameters(self) -> dict:
         """Retrieve and process SSM parameters."""
         parameter_names = [
-            f'/{self.env_stage}/bridge/notifications/notify_source_on_complete',
-            f"/{self.env_stage}/bridge/notifications/notify_bcps_on_complete",
-            f"/{self.env_stage}/bridge/notifications/notify_sysadmin_on_complete",
-            f'/{self.env_stage}/bridge/notifications/notify_source_on_exception',
-            f"/{self.env_stage}/bridge/notifications/notify_bcps_on_exception",
-            f"/{self.env_stage}/bridge/notifications/notify_sysadmin_on_exception",
-            f"/{self.env_stage}/bridge/notifications/notify_bcps_address",
-            f"/{self.env_stage}/bridge/notifications/from_address",
-            f"/{self.env_stage}/bridge/notifications/notify_sysadmin_address",
-            f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception',
-            f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'
+        f'/{self.env_stage}/bridge/notifications/notify_source_on_complete',
+        f'/{self.env_stage}/bridge/notifications/notify_bcps_on_complete',
+        f'/{self.env_stage}/bridge/notifications/notify_sysadmin_on_complete',
+        f'/{self.env_stage}/bridge/notifications/notify_source_on_exception',
+        f'/{self.env_stage}/bridge/notifications/notify_bcps_on_exception',
+        f'/{self.env_stage}/bridge/notifications/notify_sysadmin_on_exception',
+        f'/{self.env_stage}/bridge/notifications/notify_bcps_address',
+        f'/{self.env_stage}/bridge/notifications/from_address',
+        f'/{self.env_stage}/bridge/notifications/notify_sysadmin_address',
+        f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception',
+        f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'
         ]
-        
+    
         try:
-
             parameters = {}
             batch_size = 10
             for i in range(0, len(parameter_names), batch_size):
                 batch = parameter_names[i:i + batch_size]
                 ssm_response = self.ssm_client.get_parameters(Names=batch, WithDecryption=True)
+    
+                if 'InvalidParameters' in ssm_response and len(ssm_response['InvalidParameters']) > 0:
+                    raise ValueError(f"Invalid parameters: {ssm_response['InvalidParameters']}")
+    
+                for param in ssm_response['Parameters']:
+                    parameters[param['Name']] = param['Value']
         
-           
-           # Only raise if there are actual invalid parameters
-            if 'InvalidParameters' in ssm_response and len(ssm_response['InvalidParameters']) > 0:
-                raise ValueError(f"Invalid parameters: {ssm_response['InvalidParameters']}")
-        
-            for param in ssm_response['Parameters']:
-                parameters[param['Name']] = param['Value']
-                #ssm_response = self.ssm_client.get_parameters(Names=parameter_names, WithDecryption=True)
-                parameters = {param['Name']: param['Value'] for param in ssm_response['Parameters']}
-            
             self.logger.log_success(
                 event="SSM Param Retrieval",
                 message="Parameters collected successfully",
                 job_id=self.job_id,
                 custom_metadata={"parameter_names": parameter_names}
             )
+           
             return parameters
         except Exception as e:
             self.logger.log_error(event="SSM Param Retrieval Failed", error=str(e), job_id=self.job_id)
             raise
-
    
     @staticmethod
     def parse_message_attributes(message: dict) -> tuple:
@@ -226,6 +221,7 @@ class TransferProcessExceptionHandler:
         try:
             attrs = message.get('messageAttributes', {})
             job_id = self.get_attr('job_id',attrs)
+           
             if not job_id:
                 self.logger.log_error(
                 event="Retrieving Job Id failed",
@@ -243,16 +239,22 @@ class TransferProcessExceptionHandler:
                 if job_status_code:
                     #grab the code value id
                     dynamo_response = self.notification_matrix.get_item(Key={'JobStatusCodeId': job_status_code})
+                    if self.parameters:
+                            destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_bcps_address']
+                            source_email_address = self.parameters[f'/{self.env_stage}/bridge/notifications/from_address']
+                            
                     if dynamo_response:
                         item = dynamo_response.get('Item')
                         if item :
                             item.get('notificationAddress')
                             if item.get('SendToBCPS') == 'Y':
-                                destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_bcps_address"]
-                                returnEmail = self.sendEmail(job_id, destination_email= destination, triggerQueue=Constants.TRANSFER_EXCEPTION_QUEUE_NAME)
+                                
+                                    destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_bcps_address']
+                                    source_email_address = self.parameters[f'/{self.env_stage}/bridge/notifications/from_address']
+                                    returnEmail = self.sendEmail(job_id, source_email=source_email_address, destination_email= destination, triggerQueue=Constants.TRANSFER_EXCEPTION_QUEUE_NAME)
                             elif item.get("SendToSysAdmin") == 'Y':
-                                 destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_sysadmin_address"]
-                                 returnEmail = self.sendEmail(job_id, destination_email= destination, triggerQueue=Constants.TRANSFER_EXCEPTION_QUEUE_NAME)
+                                 destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_sysadmin_address']
+                                 returnEmail = self.sendEmail(job_id, destination_email= destination, source_email=source_email_address,triggerQueue=Constants.TRANSFER_EXCEPTION_QUEUE_NAME)
                             elif item.get("SendToAgency") == 'Y':
                                 self.sendSourceAgency(job_id,triggerQueue=Constants.TRANSFER_EXCEPTION_QUEUE_NAME)
             if returnEmail:
@@ -281,7 +283,8 @@ class TransferProcessExceptionHandler:
        
         try:
             attrs = message.get('messageAttributes', {})
-            job_id = self.get_attr('job_id')
+             
+            job_id = self.get_attr('job_id',attrs)
             if not job_id:
                 self.logger.log_error(
                 event="Retrieving Job Id failed",
@@ -294,7 +297,7 @@ class TransferProcessExceptionHandler:
             #check if notification flags set
             flags = self.detectNotifyCompleteValues()
 
-            if any(flags.values):
+            if any(flags.values()):
                 # some notification was set
                 for key,value  in flags.items():
                     if value:
@@ -302,7 +305,7 @@ class TransferProcessExceptionHandler:
                             returnEmail = self.sendSourceAgency(job_id, triggerQueue=Constants.SUCCESS_TRANSFER_QUEUE_NAME)
                             
                         elif key == Constants.NOTIFY_BCPS:
-                            destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_bcps_on_complete"]
+                            destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_bcps_address"]
                             returnEmail = self.sendEmail(job_id, destination_email=destination, triggerQueue=Constants.SUCCESS_TRANSFER_QUEUE_NAME)
                         elif key == Constants.NOTIFY_SYS_ADMIN:
                              destination = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_sysadmin_address"]
@@ -419,10 +422,11 @@ class TransferProcessExceptionHandler:
             return 0
         
         queryStr = f'select count(evidence_id) as file_count from evidence_files where evidence_transfer_state_code=(select identifier from status_codes where value=%s) and job_id=%s'
-        params = {  fileStatus,job_id}   
+        params = (fileStatus, job_id) 
         try:
             queryResults = self.db_manager.execute_query(queryStr, params)
-            return int(queryResults["file_count"])
+           
+            return queryResults[0]['file_count'] 
         except Exception as e:
             self.logger.log_error(
                 event=Constants.PROCESS_NAME,
@@ -480,7 +484,7 @@ class TransferProcessExceptionHandler:
 
     def sendSourceAgency(self, job_id:str, triggerQueue:str)->bool:
             try:
-                source_email_address = self.parameters[f"/{self.env_stage}/bridge/notifications/from_address"]
+                source_email_address = self.parameters[f'/{self.env_stage}/bridge/notifications/from_address']
                 destination_email = None
                 return_value = False
                 evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
@@ -515,9 +519,11 @@ class TransferProcessExceptionHandler:
             Constants.NOTIFY_SYS_ADMIN : False
         }
         #grab notify source value
-        notifySourceFlag = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_source_on_complete']
-        notifyBcpsFlag = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_bcps_on_complete"]
-        notifySysAdmin = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_sysadmin_on_complete"]
+        if self.parameters:
+            
+            notifySourceFlag = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_source_on_complete']
+            notifyBcpsFlag = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_bcps_on_complete"]
+            notifySysAdmin = self.parameters[f"/{self.env_stage}/bridge/notifications/notify_sysadmin_on_complete"]
 
         if notifySourceFlag and notifySourceFlag == "True":
             flagDict[Constants.NOTIFY_SOURCE_AGENCY] = True
@@ -540,7 +546,7 @@ def lambda_handler(event, context):
     """Main Lambda handler function."""
     env_stage = os.environ.get('ENV_STAGE', 'dev-test')
     logger = LambdaStructuredLogger()
-    logger.log_start(event="DEMS Import Requester Start", job_id=context.aws_request_id)
+    logger.log_start(event="DEMS Transfer Process Exception Handler Start for env : " + env_stage, job_id=context.aws_request_id)
     
     try:
         requester = TransferProcessExceptionHandler(env_stage, logger, context.aws_request_id)
