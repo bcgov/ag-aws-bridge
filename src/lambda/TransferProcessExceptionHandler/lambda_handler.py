@@ -145,10 +145,30 @@ class TransferProcessExceptionHandler:
 
         return job_id, sourcePath, dems_case_id, destinationPath
     
+    def update_job_status(self, job_id: str, status_value: str, msg:str)->bool:
+        """Update job status in the database."""
+        job_status_code = self.db_manager.get_status_code_by_value(value=status_value)
+   
+        try:
+            if job_status_code:
+                status_identifier = str(job_status_code["identifier"])
+            
+            self.db_manager.update_job_status(
+            job_id=job_id,
+            status_code=status_identifier,
+            job_msg=msg,
+            last_modified_process=Constants.PROCESS_NAME
+            )
+            return True
+        except Exception as e:
+            logger.log_error(event=Constants.PROCESS_NAME + " lambda update job status", error=e)
+        return False
+    
     def update_evidence_files_import_requested(self, status:str, job_id:str, last_modified_process:str):
         """Update job status in the database."""
         update_job_status = self.db_manager.get_status_code_by_value(value=status)
-        file_status_updates_tuple : List[Tuple[str,int]]  # define a list of Tuples<evidence_id, status_code> to update
+        # Add this line:
+        file_status_updates_tuple: List[Tuple[str, int]] = []
         if update_job_status:
                 status_identifier = str(update_job_status["identifier"])
                 evidence_files = self.db_manager.get_evidence_files_by_job(job_id)
@@ -232,10 +252,12 @@ class TransferProcessExceptionHandler:
                 )
                 return  # Abort processing early
             evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
+            returnEmail = False
             if evidence_transfer_job:
                 # grab the job_status_code
                 job_status_code = evidence_transfer_job["job_status_code"]
                 destination = ""
+               
                 if job_status_code:
                     #grab the code value id
                     dynamo_response = self.notification_matrix.get_item(Key={'JobStatusCodeId': job_status_code})
@@ -246,7 +268,7 @@ class TransferProcessExceptionHandler:
                     if dynamo_response:
                         item = dynamo_response.get('Item')
                         if item :
-                            item.get('notificationAddress')
+                            #item.get('notificationAddress')
                             if item.get('SendToBCPS') == 'Y':
                                 
                                     destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_bcps_address']
