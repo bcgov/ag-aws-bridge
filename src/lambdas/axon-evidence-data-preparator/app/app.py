@@ -277,7 +277,7 @@ def get_ssm_parameters(
     parameter_paths = {
         "bearer": f"/{env_stage}/axon/api/bearer",
         "base_url": f"/{env_stage}/axon/api/base_url",
-        "transfer_prepare_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-airbyte-transfer",
+        "transfer_prepare_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-data-transfer",
         "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
     }
 
