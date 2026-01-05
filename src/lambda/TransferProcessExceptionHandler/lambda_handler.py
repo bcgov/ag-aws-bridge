@@ -1,19 +1,13 @@
-import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import boto3
 import urllib3
-from urllib3.exceptions import MaxRetryError, NewConnectionError, TimeoutError
 import os
-import time
-import botocore.exceptions
-import random
-import string
 
 from datetime import datetime
 from botocore.config import Config
 
-from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
-from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
+from lambda_structured_logger import LambdaStructuredLogger
+from bridge_tracking_db_layer import get_db_manager
 
 
 class Constants:
@@ -161,7 +155,7 @@ class TransferProcessExceptionHandler:
             )
             return True
         except Exception as e:
-            logger.log_error(event=Constants.PROCESS_NAME + " lambda update job status", error=e)
+            self.logger.log_error(event=Constants.PROCESS_NAME + " lambda update job status", error=e)
         return False
     
     def update_evidence_files_import_requested(self, status:str, job_id:str, last_modified_process:str):
