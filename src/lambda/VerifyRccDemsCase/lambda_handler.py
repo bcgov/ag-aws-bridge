@@ -19,9 +19,6 @@ class Constants:
     IN_PROGRESS = "IN_PROGRESS"
     ERROR = "ERROR",
     PROCESS_NAME = "axonRccAndDemsCaseValidator"
-    REGION_NAME = "ca-central-1"
-    AGENCY_LOOKUP_TABLE_NAME = "agency-lookups"
-    HTTP_OK_CODE = 200
 
 
 class DemsCaseValidator:
@@ -42,9 +39,9 @@ class DemsCaseValidator:
         """Initialize AWS clients and resources with custom configuration."""
         config = Config(connect_timeout=5, retries={"max_attempts": 5, "mode": "standard"})
         return (
-            boto3.client("ssm", region_name=Constants.REGION_NAME, config=config),
-            boto3.client('sqs', region_name=Constants.REGION_NAME, config=config),
-            boto3.resource("dynamodb", region_name=Constants.REGION_NAME).Table(Constants.AGENCY_LOOKUP_TABLE_NAME)
+            boto3.client("ssm", region_name="ca-central-1", config=config),
+            boto3.client('sqs', region_name="ca-central-1", config=config),
+            boto3.resource("dynamodb", region_name="ca-central-1").Table("agency-lookups")
         )
 
     def _initialize_http_pool(self) -> urllib3.PoolManager:
@@ -60,8 +57,7 @@ class DemsCaseValidator:
             f'/{self.env_stage}/isl_endpoint_url',
             f'/{self.env_stage}/isl_endpoint_secret',
             f'/{self.env_stage}/isl_endpoint/case_id_method',
-            f'/{self.env_stage}/axon/api/client_id',
-            f'/{self.env_stage}/bridge/sqs-queues/arn_q-axon-case-found'
+            f'/{self.env_stage}/axon/api/client_id'
         ]
         
         try:
@@ -123,7 +119,9 @@ class DemsCaseValidator:
                 job_id = attr['stringValue']
             elif attr['dataType'] == 'Binary':
                 job_id = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
-       
+           
+
+        #job_id = body.get("job_id", {}).get('StringValue')
         if 'Source_case_title' in body:
             attr = body['Source_case_title']
             if attr['dataType'] == 'String':
@@ -131,7 +129,8 @@ class DemsCaseValidator:
             elif attr['dataType'] == 'Binary':
                 case_title = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
 
-        
+        #case_title = body.get("Source_case_title", {}).get('StringValue')
+        #carJurId = body.get("cadJurId", {}).get('StringValue')
         if 'cadJurId' in body:
             attr = body['cadJurId']
             if attr['dataType'] == 'String':
@@ -274,7 +273,7 @@ class DemsCaseValidator:
                 message_body={
                     "timestamp": current_timestamp,
                     "level": "INFO",
-                    "function": Constants.PROCESS_NAME,
+                    "function": "axonRccAndDemsCaseValidator",
                     "event": "SQSMessageQueued",
                     "message": "Queued message for Axon Case Detail and Evidence Filter",
                     "job_id": job_id,
@@ -322,7 +321,7 @@ class DemsCaseValidator:
             for code in agency_codes_to_try:
                 status, dems_case_id = self.call_dems_api(dems_api_url, bearer_token, code, agency_file_number)
                 
-                if status == Constants.HTTP_OK_CODE and dems_case_id:
+                if status == 200 and dems_case_id:
                     self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
                     self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
                     found_dems_case = True
@@ -347,7 +346,7 @@ class DemsCaseValidator:
             
             if not found_dems_case:
                 self.logger.log(
-                    event=Constants.PROCESS_NAME,
+                    event="axonRccAndDemsCaseValidator",
                     status=Constants.ERROR,
                     message="Agency prefix lookup unsuccessful - not matched",
                     job_id=job_id,
@@ -403,14 +402,14 @@ def lambda_handler(event, context):
         
         if not event["Records"]:
             logger.log(event="SQS Poll", status=Constants.IN_PROGRESS, message="No messages in queue", job_id=context.aws_request_id)
-            return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'No messages to process'}
+            return {'statusCode': 200, 'body': 'No messages to process'}
         
         logger.log_success(
             event="Verify Dems Case End",
-            message="Successfully completed " + Constants.PROCESS_NAME + " execution",
+            message="Successfully completed axonRccAndDemsCaseValidator execution",
             job_id=context.aws_request_id
         )
-        return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'Processing complete'}
+        return {'statusCode': 200, 'body': 'Processing complete'}
     
     except Exception as e:
         logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=context.aws_request_id)
