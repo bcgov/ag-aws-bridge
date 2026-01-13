@@ -1,19 +1,13 @@
-import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import boto3
 import urllib3
-from urllib3.exceptions import MaxRetryError, NewConnectionError, TimeoutError
 import os
-import time
-import botocore.exceptions
-import random
-import string
 
 from datetime import datetime
 from botocore.config import Config
 
-from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
-from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manager
+from lambda_structured_logger import LambdaStructuredLogger
+from bridge_tracking_db_layer import get_db_manager
 
 
 class Constants:
@@ -104,7 +98,7 @@ class TransferProcessExceptionHandler:
            
             return parameters
         except Exception as e:
-            self.logger.log_error(event="SSM Param Retrieval Failed", error=str(e), job_id=self.job_id)
+            self.logger.log_error(event="SSM Param Retrieval Failed", error=e, job_id=self.job_id)
             raise
    
     @staticmethod
@@ -161,7 +155,7 @@ class TransferProcessExceptionHandler:
             )
             return True
         except Exception as e:
-            logger.log_error(event=Constants.PROCESS_NAME + " lambda update job status", error=e)
+            self.logger.log_error(event=Constants.PROCESS_NAME + " lambda update job status", error=e)
         return False
     
     def update_evidence_files_import_requested(self, status:str, job_id:str, last_modified_process:str):
@@ -178,13 +172,13 @@ class TransferProcessExceptionHandler:
                             file_status_updates_tuple.append((file["evidence_id"], status_identifier))
                            
                     except KeyError as e:
-                        self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
+                        self.logger.log_error(event="Evidence File update Failed", error=e, job_id=self.job_id)
 
                     return_values = self.db_manager.bulk_update_evidence_file_states(file_status_updates_tuple,last_modified_process)
                     if return_values['success']:
                         self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Updated evidence files for job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
                     else:
-                        self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
+                        self.logger.log_error(event="Evidence File update Failed", error=e, job_id=self.job_id)
 
     def get_sqs_queue_calling(self, original_arn:str)->str:
 
@@ -245,10 +239,9 @@ class TransferProcessExceptionHandler:
             if not job_id:
                 self.logger.log_error(
                 event="Retrieving Job Id failed",
-                message=f"Failed to parse message attributes for Job_id, ending process",
                 error=None,
-                job_id="unknown",
-                message_id=messageId
+                job_id="unknown"
+               
                 )
                 return  # Abort processing early
             evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
@@ -292,10 +285,9 @@ class TransferProcessExceptionHandler:
         except Exception as e:
                 self.logger.log_error(
                 event="Message Parsing Failed",
-                message=f"Failed to parse message attributes for MessageId: {messageId}",
-                error=str(e),
-                job_id="unknown",
-                message_id=messageId
+                error=e,
+                job_id="unknown"
+              
                 )
                 return  # Abort processing early
             
@@ -310,10 +302,10 @@ class TransferProcessExceptionHandler:
             if not job_id:
                 self.logger.log_error(
                 event="Retrieving Job Id failed",
-                message=f"Failed to parse message attributes for Job_id, ending process",
+               
                 error=None,
                 job_id="unknown",
-                message_id=messageId
+               
                 )
                 return  # Abort processing early
             #check if notification flags set
@@ -347,10 +339,8 @@ class TransferProcessExceptionHandler:
         except Exception as e:
                 self.logger.log_error(
                 event="Message Parsing Failed",
-                message=f"Failed to parse message attributes for MessageId: {messageId}",
-                error=str(e),
-                job_id="unknown",
-                message_id=messageId
+                error=e,
+                job_id="unknown"
                 )
                 return  # Abort processing early
 
@@ -452,8 +442,7 @@ class TransferProcessExceptionHandler:
         except Exception as e:
             self.logger.log_error(
                 event=Constants.PROCESS_NAME,
-                message=f"Failed to execute query for job_id: {job_id} and transfer file status : {fileStatus}",
-                error=str(e),
+                error=e,
                 job_id=job_id,
                 message_id="unknownn"
                 )
@@ -488,19 +477,17 @@ class TransferProcessExceptionHandler:
                         except Exception as emailError:
                             self.logger.log_error(
                             event="Sending email failed.",
-                            message=f"Failed to send email for : {job_id}",
-                            error=str(emailError),
-                            job_id=job_id,
-                            message_id="unknown"
+                            error=emailError,
+                            job_id=job_id
                             )
                         return False  # Abort processing early
         except Exception as e:
                 self.logger.log_error(
                 event="Sending email failed.",
-                message=f"Failed to send email for : {job_id}",
-                error=str(e),
+                
+                error=e,
                 job_id=job_id,
-                message_id="unknown"
+               
                 )
                 return False # Abort processing early
 
@@ -525,10 +512,8 @@ class TransferProcessExceptionHandler:
             except Exception as e:
                 self.logger.log_error(
                 event="Sending Agency Email Failed",
-                message=f"Failed to send email for JobId: {job_id}",
-                error=str(e),
-                job_id=job_id,
-                message_id="unknown"
+                error=e,
+                job_id=job_id
                 )
                 return return_value # Abort processing early
 

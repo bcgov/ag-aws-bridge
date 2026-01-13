@@ -186,11 +186,11 @@ class DatabaseManager:
                                     evidence_id, job_id, evidence_transfer_state_code, evidence_file_id,
                                     evidence_file_type, source_case_id, file_size_bytes, checksum,
                                     axon_is_downloaded, dems_is_transferred, dems_is_imported,
-                                    last_modified_process, last_modified_utc, retry_count
+                                    last_modified_process, last_modified_utc, retry_count,evidence_id_source
                                 ) VALUES (
                                     %(evidence_id)s, %(job_id)s, %(evidence_transfer_state_code)s, %(evidence_file_id)s,
                                     %(evidence_file_type)s, %(source_case_id)s, %(file_size_bytes)s, %(checksum)s,
-                                    false, false, false, %(last_modified_process)s, NOW(), %(retry_count)s
+                                    false, false, false, %(last_modified_process)s, NOW(), %(retry_count)s,%(evidence_id_source)s
                                 ) RETURNING *
                             """
                             
@@ -463,11 +463,11 @@ class DatabaseManager:
                 evidence_id, job_id, evidence_transfer_state_code, evidence_file_id,
                 evidence_file_type, source_case_id, file_size_bytes, checksum,
                 axon_is_downloaded, dems_is_transferred, dems_is_imported,
-                last_modified_process, last_modified_utc, retry_count
+                last_modified_process, last_modified_utc, retry_count,evidence_id_source
             ) VALUES (
                 %(evidence_id)s, %(job_id)s, %(evidence_transfer_state_code)s, %(evidence_file_id)s,
                 %(evidence_file_type)s, %(source_case_id)s, %(file_size_bytes)s, %(checksum)s,
-                false, false, false, %(last_modified_process)s, NOW(), %(retry_count)s
+                false, false, false, %(last_modified_process)s, NOW(), %(retry_count)s,%(evidence_id_source)s
             ) RETURNING *
         """
         

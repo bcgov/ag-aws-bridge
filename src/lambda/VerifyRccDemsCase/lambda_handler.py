@@ -19,9 +19,6 @@ class Constants:
     IN_PROGRESS = "IN_PROGRESS"
     ERROR = "ERROR",
     PROCESS_NAME = "axonRccAndDemsCaseValidator"
-    REGION_NAME = "ca-central-1"
-    AGENCY_LOOKUP_TABLE_NAME = "agency-lookups"
-    HTTP_OK_CODE = 200
 
 
 class DemsCaseValidator:
@@ -42,9 +39,9 @@ class DemsCaseValidator:
         """Initialize AWS clients and resources with custom configuration."""
         config = Config(connect_timeout=5, retries={"max_attempts": 5, "mode": "standard"})
         return (
-            boto3.client("ssm", region_name=Constants.REGION_NAME, config=config),
-            boto3.client('sqs', region_name=Constants.REGION_NAME, config=config),
-            boto3.resource("dynamodb", region_name=Constants.REGION_NAME).Table(Constants.AGENCY_LOOKUP_TABLE_NAME)
+            boto3.client("ssm", region_name="ca-central-1", config=config),
+            boto3.client('sqs', region_name="ca-central-1", config=config),
+            boto3.resource("dynamodb", region_name="ca-central-1").Table("agency-lookups")
         )
 
     def _initialize_http_pool(self) -> urllib3.PoolManager:
@@ -61,7 +58,7 @@ class DemsCaseValidator:
             f'/{self.env_stage}/isl_endpoint_secret',
             f'/{self.env_stage}/isl_endpoint/case_id_method',
             f'/{self.env_stage}/axon/api/client_id',
-            f'/{self.env_stage}/bridge/sqs-queues/arn_q-axon-case-found'
+            f'/{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries'
         ]
         
         try:
@@ -116,6 +113,11 @@ class DemsCaseValidator:
         job_id = None
         case_title = None
         carJurId = None
+        attempt_number_str  = None
+        attenmpt_number = 1
+
+        first_attempt_time= None
+        last_attempt_time = None
 
         if 'job_id' in body:
             attr = body['job_id']
@@ -123,7 +125,9 @@ class DemsCaseValidator:
                 job_id = attr['stringValue']
             elif attr['dataType'] == 'Binary':
                 job_id = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
-       
+           
+
+        #job_id = body.get("job_id", {}).get('StringValue')
         if 'Source_case_title' in body:
             attr = body['Source_case_title']
             if attr['dataType'] == 'String':
@@ -131,7 +135,7 @@ class DemsCaseValidator:
             elif attr['dataType'] == 'Binary':
                 case_title = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
 
-        
+     
         if 'cadJurId' in body:
             attr = body['cadJurId']
             if attr['dataType'] == 'String':
@@ -142,7 +146,31 @@ class DemsCaseValidator:
         if not job_id or not case_title :
             raise ValueError("Missing job_id or Source_case_title in messsage")
         
-        return job_id, case_title, carJurId
+        if 'first_attempt_time' in body:
+            attr = body['first_attempt_time']
+            if attr['dataType'] == 'String':
+                first_attempt_time = attr['stringValue']
+            elif attr['dataType'] == 'Binary':
+                first_attempt_time = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
+
+        if 'last_attempt_time' in body:
+            attr = body['last_attempt_time']
+            if attr['dataType'] == 'String':
+                last_attempt_time = attr['stringValue']
+            elif attr['dataType'] == 'Binary':
+                last_attempt_time = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
+
+        if 'attempt_number' in body:
+            attr = body['attempt_number']
+            if attr['dataType'] == 'String':
+                attempt_number_str = attr['stringValue']
+            elif attr['dataType'] == 'Binary':
+                attempt_number_str = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
+        
+        if attempt_number_str:
+            attenmpt_number = int(attempt_number_str)
+
+        return job_id, case_title, carJurId, attenmpt_number, first_attempt_time, last_attempt_time
 
     @staticmethod
     def parse_case_title(case_title: str) -> tuple:
@@ -214,22 +242,24 @@ class DemsCaseValidator:
         
         return api_response.status, api_response.data.decode('utf-8').strip()
 
-    def update_job_status(self, job_id: str, status_value: str, agency_id_code:str, agency_file_number:str):
+    def update_job_status(self, job_id: str, status_value: str, agency_id_code:str, agency_file_number:str, job_msg:str, retry_count:int):
         """Update job status in the database."""
-        update_job_status = self.db_manager.get_status_code_by_value(value=status_value)
-        if update_job_status:
-            status_identifier = str(update_job_status["identifier"])
-            self.db_manager.update_job_status(
-                job_id=job_id,
-                status_code=status_identifier,
-                job_msg="",
-                agency_id_code=agency_id_code,
-                agency_file_number=agency_file_number,
-                last_modified_process="lambda: rcc and dems case validator"
-            )
+        if status_value:
+            update_job_status = self.db_manager.get_status_code_by_value(value=status_value)
+            if update_job_status:
+                status_identifier = str(update_job_status["identifier"])
+                self.db_manager.update_job_status(
+                    job_id=job_id,
+                    status_code=status_identifier,
+                    job_msg=job_msg,
+                    agency_id_code=agency_id_code,
+                    agency_file_number=agency_file_number,
+                    retry_count=retry_count,
+                    last_modified_process="lambda: rcc and dems case validator"
+                )
 
     def send_sqs_message(self, queue_name: str, job_id: str, case_id: str,
-                         current_timestamp: str, custom_exception: Exception = None, case_title: str = None):
+                         current_timestamp: str, custom_exception: Exception = None, case_title: str = None, message_attributes:dict=None):
         """Send message to SQS queue."""
         # Define the alphanumeric character pool
         alphanumeric_chars = string.ascii_letters + string.digits
@@ -240,11 +270,11 @@ class DemsCaseValidator:
         try:
             queue_url = self.sqs_client.get_queue_url(QueueName=queue_name)['QueueUrl']
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
-            
-            message_attributes = {
-                'Job_id': {'DataType': 'String', 'StringValue': job_id},
-                'Source_case_id': {'DataType': 'String', 'StringValue': case_id}
-            }
+            if not message_attributes:
+                message_attributes = {
+                    'Job_id': {'DataType': 'String', 'StringValue': job_id},
+                    'Source_case_id': {'DataType': 'String', 'StringValue': case_id}
+                }
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
                 message_attributes['ExceptionMessage'] = {
@@ -274,7 +304,7 @@ class DemsCaseValidator:
                 message_body={
                     "timestamp": current_timestamp,
                     "level": "INFO",
-                    "function": Constants.PROCESS_NAME,
+                    "function": "axonRccAndDemsCaseValidator",
                     "event": "SQSMessageQueued",
                     "message": "Queued message for Axon Case Detail and Evidence Filter",
                     "job_id": job_id,
@@ -292,7 +322,7 @@ class DemsCaseValidator:
     def process_message(self, message: dict):
         """Process a single SQS message."""
         try:
-            job_id, case_title, cadJurId = self.parse_message_attributes(message)
+            job_id, case_title, cadJurId, attenmpt_number, first_attempt_time, last_attempt_time = self.parse_message_attributes(message)
             rms_jur_id, agency_file_number = self.parse_case_title(case_title)
             
             agency_id_code, sub_agency_yn, sub_agencies = self.lookup_agency_code(rms_jur_id, cadJurId)
@@ -319,10 +349,11 @@ class DemsCaseValidator:
             bearer_token = self.parameters[f'/{self.env_stage}/isl_endpoint_secret']
             agency_codes_to_try = [agency_id_code] + (sub_agencies if sub_agency_yn == 'Y' else [])
             found_dems_case = False
+
             for code in agency_codes_to_try:
                 status, dems_case_id = self.call_dems_api(dems_api_url, bearer_token, code, agency_file_number)
                 
-                if status == Constants.HTTP_OK_CODE and dems_case_id:
+                if status == 200 and dems_case_id:
                     self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
                     self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
                     found_dems_case = True
@@ -330,7 +361,16 @@ class DemsCaseValidator:
                 elif status >= 400:
                     self.logger.log_error(event="DEMS API Error", error=f"HTTP error: {status}", job_id=job_id)
             
-            status_value = "VALID-CASE" if found_dems_case else "INVALID-AGENCY-IDENTIFIER"
+            if sub_agency_yn == 'N' :
+                lambda_rcc_dems_case_retries = self.parameters[f'{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries']
+                if int(lambda_rcc_dems_case_retries) == attenmpt_number:
+                    #no case found path
+                    self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['ReceiptHandle'], case_title)
+                elif int(lambda_rcc_dems_case_retries) > attenmpt_number:
+                    # exception path
+                    self.process_exception_path(job_id, rms_jur_id, agency_id_code,agency_file_number, message['ReceiptHandle'], case_title)
+
+            status_value = "VALID-CASE" if found_dems_case else None
             self.update_job_status(job_id, status_value, agency_file_number=agency_file_number, agency_id_code=agency_id_code)
             
             current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
@@ -347,7 +387,7 @@ class DemsCaseValidator:
             
             if not found_dems_case:
                 self.logger.log(
-                    event=Constants.PROCESS_NAME,
+                    event="axonRccAndDemsCaseValidator",
                     status=Constants.ERROR,
                     message="Agency prefix lookup unsuccessful - not matched",
                     job_id=job_id,
@@ -358,6 +398,61 @@ class DemsCaseValidator:
         except Exception as msg_err:
             self.logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=self.job_id)
 
+def process_no_case_found(self , job_id:str, rms_jur_id:str, agency_id_code:str,agency_file_num:str, job_msg:str,retry_count:int, first_attempt_time:str, message_handle:str, source_case_title:str )->bool:
+        status_value = "INVALID-CASE"
+        self.update_job_status(job_id,status_value , agency_file_num, agency_id_code, job_msg=job_msg, retry_count = retry_count +1 )
+
+        current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+        self.logger.log(
+                    event="Axon Case Agency Lookup",
+                    status=Constants.INFO,
+                    function="axonRccAndDemsCaseValidator",
+                    message="Agency prefix lookup to RCC and DEMS usuccessful - no match",
+                    source_case_title=source_case_title,
+                    job_id=job_id,
+                    additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num, "agency_id_code" : agency_id_code}
+                )
+          # end of attempts, delete the message
+        queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
+        self.sqs_client.delete_message(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message_handle
+                )
+        self.logger.info(f"Deleted message: {message_handle}")
+        message_attributes = {
+            "attempt_number"    : retry_count,
+            "first_attempt_time"    : first_attempt_time,
+            "last_attempt_time"     : current_timestamp
+
+        }
+        self.send_sqs_message('q-axon-case-found.fifo', job_id, case_title=source_case_title, current_timestamp=current_timestamp, message_attributes=message_attributes)
+
+def process_exception_message(self, job_id:str, rms_jur_id:str, agency_id_code:str,agency_file_num:str,message_handle:str, source_case_title:str )->bool:
+    status_code = "INVALID-AGENCY-IDENTIFIER"
+    self.update_job_status(job_id,status_code, agency_file_num, agency_id_code,job_msg=None)
+    current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+    self.logger.log(
+                    function="axonRccAndDemsCaseValidator",
+                    event="Axon Case Agency Lookup",
+                    status=Constants.ERROR,
+                    message="Agency prefix lookup unsuccessful - not matched",
+                    job_id=job_id,
+                    additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num}
+
+                )
+    queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
+    self.sqs_client.delete_message(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message_handle
+                )
+    self.logger.info(f"Deleted message: {message_handle}")
+    message_attributes = {
+            "job_id"    : job_id,
+            "source_case_title"    : source_case_title,
+            "exception_agency_match"     : current_timestamp
+
+        }
+    self.send_sqs_message('q-transfer-exception.fifo', job_id, None, current_timestamp, Exception("Case not found"), None, message_attributes=message_attributes)
 
 def lambda_handler(event, context):
     """Main Lambda handler function."""
@@ -385,7 +480,6 @@ def lambda_handler(event, context):
             if 'job_id' in message_attributes:
                 attr = message_attributes['job_id']
                 job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
-            
 
             if not job_id :
                 logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id is required"))
@@ -403,14 +497,14 @@ def lambda_handler(event, context):
         
         if not event["Records"]:
             logger.log(event="SQS Poll", status=Constants.IN_PROGRESS, message="No messages in queue", job_id=context.aws_request_id)
-            return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'No messages to process'}
+            return {'statusCode': 200, 'body': 'No messages to process'}
         
         logger.log_success(
             event="Verify Dems Case End",
-            message="Successfully completed " + Constants.PROCESS_NAME + " execution",
+            message="Successfully completed axonRccAndDemsCaseValidator execution",
             job_id=context.aws_request_id
         )
-        return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'Processing complete'}
+        return {'statusCode': 200, 'body': 'Processing complete'}
     
     except Exception as e:
         logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=context.aws_request_id)
