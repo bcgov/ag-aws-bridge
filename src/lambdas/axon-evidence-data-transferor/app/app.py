@@ -176,7 +176,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Pattern: {{source_case_title}_{dems_case_id}_{job_id}.zip
         folder_name = f"{source_case_title}_{dems_case_id}_{job_id}"
         source_key = f"{folder_name}.zip"
-        # source_key = "210_25-250904_PDEMS_Integration_Files.zip"
+        source_key = "2101-2025-731075_5452_e9e5589e-f4ba-45dc-b3fd-fdb5bb06f7d2.zip"
 
         dest_bucket = ssm_parameters['edt_s3_bucket']
         # dest_key = source_key
@@ -248,7 +248,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         queue_success_message(
             job_id=job_id,
             success_queue_url=ssm_parameters['dems_import_queue_url'],
-            loadFilePath=complete_load_file_path,
+            sourcePath=source_key,
+            destinationPath=complete_load_file_path,
             dems_case_id=dems_case_id
         )
 
@@ -1325,8 +1326,9 @@ def queue_message(
 def queue_success_message(
     job_id: str, 
     success_queue_url: str,
-    loadFilePath: Optional[str] = None,
-    dems_case_id: Optional[str] = None,
+    sourcePath: Optional[str],
+    destinationPath: Optional[str],
+    dems_case_id: Optional[str],
     **additional_data
 ) -> bool:
     """
@@ -1335,7 +1337,8 @@ def queue_success_message(
     Args:
         job_id: The job ID
         success_queue_url: The success SQS queue URL
-        loadFilePath: Optional path to the loaded file
+        sourcePath: Path to the source package file in BRIDGE S3
+        destinationPath: Path to the uploaded file in EDT S3
         dems_case_id: Optional DEMS case ID
         **additional_data: Any other data elements to include
         
@@ -1344,8 +1347,11 @@ def queue_success_message(
     """
     message_data = {}
     
-    if loadFilePath is not None:
-        message_data['loadFilePath'] = loadFilePath
+    if sourcePath is not None:
+        message_data['sourcePath'] = sourcePath
+    
+    if destinationPath is not None:
+        message_data['destinationPath'] = destinationPath
     
     if dems_case_id is not None:
         message_data['dems_case_id'] = dems_case_id

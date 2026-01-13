@@ -300,7 +300,7 @@ def get_ssm_parameters(
         "bearer": f"/{env_stage}/axon/api/bearer",
         "base_url": f"/{env_stage}/axon/api/base_url",
         "evidence_download_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download",
-        "evidence_metadata_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-metadata",
+        "evidence_metadata_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-case-metadata-update",
         "s3_bucket": f"/{env_stage}/edt/s3/bucket",
         "s3_role": f"/{env_stage}/edt/s3/iam/role_arn",
     }
