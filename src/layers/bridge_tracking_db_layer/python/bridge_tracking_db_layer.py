@@ -701,19 +701,18 @@ class DatabaseManager:
 
     def get_source_case_information(self, job_id: str) -> Dict[str, Any] | None:
         """
-        Get source_agency (guid value) for a specific evidence and job 
-        when evidence_transfer_state_code is 30 (DOWNLOAD-READY).
+        Get source case information for a specific job.
         
         Args:
-            evidence_id: The evidence ID to look up
             job_id: The job ID to look up
             
         Returns:
-            str | None: The source_agency GUID value, or None if not found or state is not 30
+            Dict[str, Any] | None: A dictionary containing source_case_title, source_case_id, and dems_case_id, or None if not found
         """
         query = """
             SELECT j.source_case_title,
-                j.source_case_id 
+                j.source_case_id,
+                j.dems_case_id
             FROM evidence_transfer_jobs j
             WHERE j.job_id = %s
         """
@@ -724,6 +723,7 @@ class DatabaseManager:
             return {
                 "source_case_title": result[0]['source_case_title'],
                 "source_case_id": result[0]['source_case_id'],
+                "dems_case_id": result[0]['dems_case_id'],
             }
         return None
 
