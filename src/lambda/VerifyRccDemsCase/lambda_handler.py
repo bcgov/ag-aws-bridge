@@ -328,7 +328,7 @@ class DemsCaseValidator:
             agency_id_code, sub_agency_yn, sub_agencies = self.lookup_agency_code(rms_jur_id, cadJurId)
             if not agency_id_code:
                 status_value = "INVALID-AGENCY-IDENTIFIER"
-                self.update_job_status(job_id, status_value, agency_id_code=agency_id_code, agency_file_number=agency_file_number)
+                self.update_job_status(job_id, status_value, agency_id_code=agency_id_code, agency_file_number=agency_file_number,job_msg="",retry_count=attenmpt_number+1)
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
                 self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Agency Code not found"), case_title)
                 return
@@ -368,13 +368,14 @@ class DemsCaseValidator:
                     self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['ReceiptHandle'], case_title)
                 elif int(lambda_rcc_dems_case_retries) > attenmpt_number:
                     # exception path
-                    self.process_exception_path(job_id, rms_jur_id, agency_id_code,agency_file_number, message['ReceiptHandle'], case_title)
+                    self.process_exception_message(job_id, rms_jur_id, agency_id_code,agency_file_number, message['ReceiptHandle'], case_title)
 
             status_value = "VALID-CASE" if found_dems_case else None
-            self.update_job_status(job_id, status_value, agency_file_number=agency_file_number, agency_id_code=agency_id_code)
+            self.update_job_status(job_id, status_value, agency_file_number=agency_file_number, agency_id_code=agency_id_code, retry_count=attenmpt_number,job_msg="")
             
             current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
             if found_dems_case:
+                self.send_sqs_message('', job_id,dems_case_id, current_timestamp, )
                 self.send_sqs_message('q-case-detail.fifo', job_id, dems_case_id, current_timestamp)
                 
                 # If processing succeeds, delete the message
