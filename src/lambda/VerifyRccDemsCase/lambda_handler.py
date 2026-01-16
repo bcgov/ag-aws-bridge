@@ -282,7 +282,7 @@ class DemsCaseValidator:
                     'StringValue': str(custom_exception)[:256]  # SQS message attributes have a 256-byte limit
                 }
             # Add case_title to message attributes if case_title is not None
-            if case_title is not None:
+            if case_title is not None and message_attributes is not None:
                 message_attributes['Case_title'] = {
                     'DataType': 'String',
                     'StringValue': case_title[:256],  # Ensure case_title adheres to SQS 256-byte limit
@@ -293,7 +293,7 @@ class DemsCaseValidator:
                 MessageBody='Sending SQS message to ' + queue_name,
                 DelaySeconds=0,
                 MessageGroupId="axon-evidence-transfer",
-                MessageDeduplicationId=random_string,
+                MessageDeduplicationId=job_id,
                 MessageAttributes=message_attributes
             )
             
@@ -330,6 +330,12 @@ class DemsCaseValidator:
                 status_value = "INVALID-AGENCY-IDENTIFIER"
                 self.update_job_status(job_id, status_value, agency_id_code=agency_id_code, agency_file_number=agency_file_number,job_msg="",retry_count=attenmpt_number+1)
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+                queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
+                self.sqs_client.delete_message(
+                    QueueUrl=queue_url,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
+                self.logger.info(f"Deleted message: {message['MessageId']}")
                 self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Agency Code not found"), case_title)
                 return
             
@@ -363,10 +369,10 @@ class DemsCaseValidator:
             
             if sub_agency_yn == 'N' :
                 lambda_rcc_dems_case_retries = self.parameters[f'{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries']
-                if int(lambda_rcc_dems_case_retries) == attenmpt_number:
+                if int(lambda_rcc_dems_case_retries) < attenmpt_number:
                     #no case found path
                     self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['ReceiptHandle'], case_title)
-                elif int(lambda_rcc_dems_case_retries) > attenmpt_number:
+                elif int(lambda_rcc_dems_case_retries) == attenmpt_number:
                     # exception path
                     self.process_exception_message(job_id, rms_jur_id, agency_id_code,agency_file_number, message['ReceiptHandle'], case_title)
 
@@ -375,7 +381,7 @@ class DemsCaseValidator:
             
             current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
             if found_dems_case:
-                self.send_sqs_message('', job_id,dems_case_id, current_timestamp, )
+                self.send_sqs_message('q-axon-case-share-received.fifo', job_id,dems_case_id, current_timestamp)
                 self.send_sqs_message('q-case-detail.fifo', job_id, dems_case_id, current_timestamp)
                 
                 # If processing succeeds, delete the message
