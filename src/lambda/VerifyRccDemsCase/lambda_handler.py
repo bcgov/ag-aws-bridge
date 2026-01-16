@@ -19,6 +19,7 @@ class Constants:
     IN_PROGRESS = "IN_PROGRESS"
     ERROR = "ERROR",
     PROCESS_NAME = "axonRccAndDemsCaseValidator"
+    HTTP_OK = 200
 
 
 class DemsCaseValidator:
@@ -359,7 +360,7 @@ class DemsCaseValidator:
             for code in agency_codes_to_try:
                 status, dems_case_id = self.call_dems_api(dems_api_url, bearer_token, code, agency_file_number)
                 
-                if status == 200 and dems_case_id:
+                if status == Constants.HTTP_OK and dems_case_id:
                     self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
                     self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
                     found_dems_case = True
@@ -454,9 +455,9 @@ def process_exception_message(self, job_id:str, rms_jur_id:str, agency_id_code:s
                 )
     self.logger.info(f"Deleted message: {message_handle}")
     message_attributes = {
-            "job_id"    : job_id,
-            "source_case_title"    : source_case_title,
-            "exception_agency_match"     : current_timestamp
+            "job_id"                        : job_id,
+            "source_case_title"             : source_case_title,
+            "exception_agency_match"        : current_timestamp
 
         }
     self.send_sqs_message('q-transfer-exception.fifo', job_id, None, current_timestamp, Exception("Case not found"), None, message_attributes=message_attributes)
@@ -471,7 +472,6 @@ def lambda_handler(event, context):
     
     try:
         validator = DemsCaseValidator(env_stage, logger, context.aws_request_id)
-       # messages = validator.receive_sqs_messages(validator.parameters[f'/{env_stage}/bridge/sqs-queues/arn_q-axon-case-found'])
         if not event.get("Records"):
             logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No records found in event"))
             return {
@@ -504,14 +504,14 @@ def lambda_handler(event, context):
         
         if not event["Records"]:
             logger.log(event="SQS Poll", status=Constants.IN_PROGRESS, message="No messages in queue", job_id=context.aws_request_id)
-            return {'statusCode': 200, 'body': 'No messages to process'}
+            return {'statusCode': Constants.HTTP_OK, 'body': 'No messages to process'}
         
         logger.log_success(
             event="Verify Dems Case End",
             message="Successfully completed axonRccAndDemsCaseValidator execution",
             job_id=context.aws_request_id
         )
-        return {'statusCode': 200, 'body': 'Processing complete'}
+        return {'statusCode': Constants.HTTP_OK, 'body': 'Processing complete'}
     
     except Exception as e:
         logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=context.aws_request_id)
