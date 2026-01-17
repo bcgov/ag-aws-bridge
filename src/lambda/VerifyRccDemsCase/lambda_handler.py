@@ -20,6 +20,8 @@ class Constants:
     ERROR = "ERROR",
     PROCESS_NAME = "axonRccAndDemsCaseValidator"
     HTTP_OK = 200
+    HTTP_BAD_REQUEST = 400
+
 
 
 class DemsCaseValidator:
@@ -82,7 +84,7 @@ class DemsCaseValidator:
             )
             return parameters
         except Exception as e:
-            self.logger.log_error(event="SSM Param Retrieval Failed", error=str(e), job_id=self.job_id)
+            self.logger.log_error(event="SSM Param Retrieval Failed", error=e, job_id=self.job_id)
             raise
 
     def receive_sqs_messages(self, queue_url: str) -> list:
@@ -129,8 +131,8 @@ class DemsCaseValidator:
            
 
         #job_id = body.get("job_id", {}).get('StringValue')
-        if 'Source_case_title' in body:
-            attr = body['Source_case_title']
+        if 'source_case_title' in body:
+            attr = body['source_case_title']
             if attr['dataType'] == 'String':
                 case_title = attr['stringValue']
             elif attr['dataType'] == 'Binary':
@@ -145,7 +147,7 @@ class DemsCaseValidator:
                 carJurId = attr.get('binaryValue')  # Decode if needed, e.g., job_id.decode('utf-8')
         
         if not job_id or not case_title :
-            raise ValueError("Missing job_id or Source_case_title in messsage")
+            raise ValueError("Missing job_id or source_case_title in messsage")
         
         if 'first_attempt_time' in body:
             attr = body['first_attempt_time']
@@ -227,21 +229,24 @@ class DemsCaseValidator:
         }
         
         self.logger.log(event="DEMS API Call", status=LogStatus.IN_PROGRESS, message=f"Calling DEMS API with agencyIdCode: {agency_code}", job_id=self.job_id)
+        try:
+            start_time = time.perf_counter()
+            api_response = self.http.request('GET', dems_api_url, headers=headers)
+            response_time = time.perf_counter() - start_time
         
-        start_time = time.perf_counter()
-        api_response = self.http.request('GET', dems_api_url, headers=headers)
-        response_time = time.perf_counter() - start_time
-        
-        self.logger.log_api_call(
+            self.logger.log_api_call(
             event="DEMS ISL Get Cases",
             url=dems_api_url,
             method="GET",
             status_code=api_response.status,
             response_time=response_time,
             job_id=self.job_id
-        )
+            )
         
-        return api_response.status, api_response.data.decode('utf-8').strip()
+            return api_response.status, api_response.data.decode('utf-8').strip()
+        except Exception as e:
+            self.logger.log_error(event="Call to DEMS API Failed", error=e, job_id=self.job_id)
+            return Constants.HTTP_BAD_REQUEST, None
 
     def update_job_status(self, job_id: str, status_value: str, agency_id_code:str, agency_file_number:str, job_msg:str, retry_count:int):
         """Update job status in the database."""
@@ -310,7 +315,7 @@ class DemsCaseValidator:
                     "message": "Queued message for Axon Case Detail and Evidence Filter",
                     "job_id": job_id,
                     "source_case_title": case_title,
-                    "additional_info": {
+                    "message_attributes": {
                         "target_queue": queue_name,
                         "message_group_id": job_id,
                         "deduplication_id": "file-" + random_string
@@ -318,7 +323,7 @@ class DemsCaseValidator:
                 }
             )
         except Exception as e:
-            self.logger.log_error(event="SQS Message Send Failed", error=str(e), job_id=self.job_id)
+            self.logger.log_error(event="SQS Message Send Failed", error=e, job_id=self.job_id)
 
     def process_message(self, message: dict):
         """Process a single SQS message."""
@@ -365,7 +370,7 @@ class DemsCaseValidator:
                     self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
                     found_dems_case = True
                     break
-                elif status >= 400:
+                elif status >= Constants.HTTP_BAD_REQUEST:
                     self.logger.log_error(event="DEMS API Error", error=f"HTTP error: {status}", job_id=job_id)
             
             if sub_agency_yn == 'N' :
@@ -399,7 +404,7 @@ class DemsCaseValidator:
                     status=Constants.ERROR,
                     message="Agency prefix lookup unsuccessful - not matched",
                     job_id=job_id,
-                    additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
+                    custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
                 )
                 self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
                 
@@ -418,7 +423,7 @@ def process_no_case_found(self , job_id:str, rms_jur_id:str, agency_id_code:str,
                     message="Agency prefix lookup to RCC and DEMS usuccessful - no match",
                     source_case_title=source_case_title,
                     job_id=job_id,
-                    additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num, "agency_id_code" : agency_id_code}
+                    custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num, "agency_id_code" : agency_id_code}
                 )
           # end of attempts, delete the message
         queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
@@ -428,7 +433,7 @@ def process_no_case_found(self , job_id:str, rms_jur_id:str, agency_id_code:str,
                 )
         self.logger.info(f"Deleted message: {message_handle}")
         message_attributes = {
-            "attempt_number"    : retry_count,
+            "attempt_number"        : retry_count,
             "first_attempt_time"    : first_attempt_time,
             "last_attempt_time"     : current_timestamp
 
@@ -445,7 +450,7 @@ def process_exception_message(self, job_id:str, rms_jur_id:str, agency_id_code:s
                     status=Constants.ERROR,
                     message="Agency prefix lookup unsuccessful - not matched",
                     job_id=job_id,
-                    additional_info={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num}
+                    custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num}
 
                 )
     queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
@@ -475,7 +480,7 @@ def lambda_handler(event, context):
         if not event.get("Records"):
             logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No records found in event"))
             return {
-                'statusCode': 400,
+                'statusCode': Constants.HTTP_BAD_REQUEST,
                 'body': json.dumps({'error': 'No records found in event'})
             }
 
@@ -491,7 +496,7 @@ def lambda_handler(event, context):
             if not job_id :
                 logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id is required"))
                 return {
-                    'statusCode': 400,
+                    'statusCode': Constants.HTTP_BAD_REQUEST,
                     'body': json.dumps({
                         'error': 'job_id and source_case_id are required',
                         'received_event': event
@@ -514,5 +519,5 @@ def lambda_handler(event, context):
         return {'statusCode': Constants.HTTP_OK, 'body': 'Processing complete'}
     
     except Exception as e:
-        logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=context.aws_request_id)
+        logger.log_error(event="Lambda Execution Failed", error=e, job_id=context.aws_request_id)
         raise
