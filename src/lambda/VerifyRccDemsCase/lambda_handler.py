@@ -333,15 +333,16 @@ class DemsCaseValidator:
             
             agency_id_code, sub_agency_yn, sub_agencies = self.lookup_agency_code(rms_jur_id, cadJurId)
             if not agency_id_code:
+                #couldn't find agency code, send exception message
                 status_value = "INVALID-AGENCY-IDENTIFIER"
                 self.update_job_status(job_id, status_value, agency_id_code=agency_id_code, agency_file_number=agency_file_number,job_msg="",retry_count=attenmpt_number+1)
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
                 queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
                 self.sqs_client.delete_message(
                     QueueUrl=queue_url,
-                    ReceiptHandle=message['ReceiptHandle']
+                    ReceiptHandle=message['receiptHandle']
                 )
-                self.logger.info(f"Deleted message: {message['MessageId']}")
+                self.logger.log( event=Constants.PROCESS_NAME, status=LogStatus.IN_PROGRESS, message=f"Deleted message: {message['receiptHandle']}", job_id=job_id)
                 self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Agency Code not found"), case_title)
                 return
             
@@ -377,10 +378,10 @@ class DemsCaseValidator:
                 lambda_rcc_dems_case_retries = self.parameters[f'{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries']
                 if int(lambda_rcc_dems_case_retries) < attenmpt_number:
                     #no case found path
-                    self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['ReceiptHandle'], case_title)
+                    self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['receiptHandle'], case_title)
                 elif int(lambda_rcc_dems_case_retries) == attenmpt_number:
                     # exception path
-                    self.process_exception_message(job_id, rms_jur_id, agency_id_code,agency_file_number, message['ReceiptHandle'], case_title)
+                    self.process_exception_message(job_id, rms_jur_id, agency_id_code,agency_file_number, message['receiptHandle'], case_title)
 
             status_value = "VALID-CASE" if found_dems_case else None
             self.update_job_status(job_id, status_value, agency_file_number=agency_file_number, agency_id_code=agency_id_code, retry_count=attenmpt_number,job_msg="")
@@ -394,7 +395,7 @@ class DemsCaseValidator:
                 queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
                 self.sqs_client.delete_message(
                     QueueUrl=queue_url,
-                    ReceiptHandle=message['ReceiptHandle']
+                    ReceiptHandle=message['receiptHandle']
                 )
                 self.logger.info(f"Deleted message: {message['MessageId']}")
             
