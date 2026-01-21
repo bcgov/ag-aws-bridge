@@ -52,6 +52,7 @@ Resources:
   AxonAuthenticatorFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-AxonAuthenticatorFunction"
       CodeUri: src/lambdas/axon-authenticator/hello_world/
       Handler: app.lambda_handler
       Runtime: python3.13
@@ -95,6 +96,7 @@ Resources:
   AxonEvidenceDownloaderFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-AxonEvidenceDownloaderFunction"
       CodeUri: src/lambdas/axon-evidence-downloader/app
       Handler: app.lambda_handler
       Runtime: python3.11
@@ -130,8 +132,9 @@ Resources:
   # AxonEvidenceDataPreparatorFunction:
   #   Type: AWS::Serverless::Function
   #   Properties:
-  #     CodeUri: src/lambdas/axon-evidence-data-preparator/app
-  #     Handler: app.lambda_handler
+  #     FunctionName: !Sub "${AWS::StackName}-AxonEvidenceDataPreparatorFunction"
+  #     CodeUri: src/lambdas/axon-evidence-data-preparator
+  #     Handler: app/app.lambda_handler
   #     Runtime: python3.11
   #     Architectures:
   #       - x86_64
@@ -163,6 +166,7 @@ Resources:
   AxonEvidenceDataTransferorFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub "${AWS::StackName}-AxonEvidenceDataTransferorFunction"
       CodeUri: src/lambdas/axon-evidence-data-transferor/app
       Handler: app.lambda_handler
       Runtime: python3.11
