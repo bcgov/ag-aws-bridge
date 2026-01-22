@@ -18,7 +18,9 @@ from bridge_tracking_db_layer import (
     
 class Constants:
     PROCESS_NAME = "axon-case-detail-and-evidence-filter"
-    SIZE_THRESHOLD_BYTES = 10 * 1024 * 1024 * 1024  # 10GB
+    SIZE_THRESHOLD_BYTES = 1073741824 # 10 GB in bytes
+
+  # 10GB
     SQS_BATCH_SIZE = 10
 
 logger = LambdaStructuredLogger()
@@ -305,7 +307,7 @@ def lambda_update_job_status( job_id: str, status_value: str, msg:str):
             job_id=job_id,
             status_code=status_identifier,
             job_msg=msg,
-            last_modified_process="lambda: case detail filter"
+            last_modified_process="llambda: axon case detail and evidence filer"
         )
 # API functions using configuration from SSM
 def get_case_evidence_from_api(source_case_id: str, job_id: str, config: Dict[str, str], context_data: Dict[str, Any]) -> List[Dict]:
@@ -321,7 +323,7 @@ def get_case_evidence_from_api(source_case_id: str, job_id: str, config: Dict[st
             'Content-Type': 'application/json'
         }
         api_url = f"{config['axon_base_url']}api/v2/agencies/{config['axon_agency_id']}/cases/{source_case_id}/relationships/evidence"
-        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {requests.api.__path__} for case {source_case_id}")
 
         start_time = time.perf_counter()
         response = requests.get(api_url, headers=headers, timeout=30)
@@ -544,8 +546,6 @@ def get_evidence_details_from_api(evidence_id: str, config: Dict[str, str]) -> D
         api_url =  config['axon_base_url'] + 'api/v2/agencies/' + config['axon_agency_id'] + '/evidence/' + evidence_id 
         
         logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon Evidence Details API for evidence {evidence_id}")
-        
-        
         response = requests.get(api_url, headers=headers,  timeout=30,verify=True)
         response.raise_for_status()
         
@@ -591,11 +591,35 @@ def process_evidence_records(
         try:
             evidence_details = get_evidence_details_from_api(evidence_id, config)
             file_size_bytes = evidence_details.get('size', 0)
-            state_code = (
+            if file_size_bytes > Constants.SIZE_THRESHOLD_BYTES:
+                custom_metadata = {
+                    "file size" : file_size_bytes,
+                    "evidence_id" : evidence_id,
+                    "msg" : "transfer rejected; oversize evidence file detected"
+                }
+                error_message = "transfer rejected; oversize evidence file detected"
+                logger.log_success(event=Constants.PROCESS_NAME, message=f"transfer rejected; oversize evidence file detected for job_id: {job_id}, source_case_id: {source_case_id}", job_id=job_id, custom_metadata=custom_metadata)
+                lambda_update_job_status(job_id, StatusCodes.FAILED,error_message )
+                db_manager.update_job_counts(job_id,len(evidence_record),last_modified_process="lambda: axon case detail and evidence filter")
+                
+                exception_data = {
+                'job_id': job_id,
+                'source_case_id' : source_case_id
+                }
+
+                sqs = boto3.client('sqs')
+                sqs.send_message(
+                QueueUrl=config['transfer_exception_queue_url'],
+                MessageBody=json.dumps(exception_data),
+                MessageGroupId=f"exceptions-{job_id}" if job_id else "exceptions-general",
+                MessageDeduplicationId=f"{job_id}-{evidence_id}-{hash(error_message)}" if evidence_id else f"{job_id}-general-{hash(error_message)}"
+                )
+
+            else:
+                state_code = (
                 StatusCodes.DOWNLOAD_READY
-                if file_size_bytes < Constants.SIZE_THRESHOLD_BYTES
-                else StatusCodes.DOWNLOAD_READY_OVERSIZE
-            )
+                )
+
             files_data = evidence_details.get("data", {}).get("relationships", {}).get("files", {}).get("data", [])
 
             if not isinstance(files_data, list):
@@ -611,7 +635,6 @@ def process_evidence_records(
                 file_size = file_attributes.get('size', 0)
                 if not file_id or not isinstance(file_size, (int, float)):
                     logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Missing or invalid file id/size for evidence_id {evidence_id}: {file_entry}"))
-                    
                     continue
 
                 file_data={
@@ -720,28 +743,67 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         for record in event["Records"]:
             message_attributes = record.get('messageAttributes', {})
-            job_id = None
-            source_case_id = None
-
-            if 'job_id' in message_attributes:
-                attr = message_attributes['job_id']
-                job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
-            if 'source_case_id' in message_attributes:
-                attr = message_attributes['source_case_id']
-                source_case_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
-
-            if not job_id or not source_case_id:
-                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id and source_case_id are required"))
+    
+        # If message_attributes is a string (e.g., JSON), parse it to a dict
+        if isinstance(message_attributes, str):
+            try:
+                message_attributes = json.loads(message_attributes)
+            except json.JSONDecodeError:
+                logger.log_error(event=Constants.PROCESS_NAME, error=Exception("Invalid JSON in messageAttributes"))
                 return {
                     'statusCode': 400,
                     'body': json.dumps({
-                        'error': 'job_id and source_case_id are required',
-                        'received_event': event
-                    })
-                }
+                    'error': 'Invalid JSON in messageAttributes',
+                    'received_event': event
+                })
+            }
+    
+        # Ensure it's a dict after any parsing
+        if not isinstance(message_attributes, dict):
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("messageAttributes must be a dict"))
+            return {
+            'statusCode': 400,
+            'body': json.dumps({
+                'error': 'messageAttributes must be a dict',
+                'received_event': event
+            })
+        }
+    
+        job_id = None
+        source_case_id = None
 
-            logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
-            results = process_case_evidence_with_sqs(job_id, source_case_id, context_data=base_context)
+        if 'job_id' in message_attributes:
+            attr = message_attributes['job_id']
+            # If attr is already a string (non-standard attribute), use it directly
+        if isinstance(attr, str):
+            job_id = attr
+        elif isinstance(attr, dict):
+            job_id = attr['stringValue'] if attr.get('dataType') == 'String' else attr.get('binaryValue')
+        else:
+            # Handle unexpected types
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Unexpected type for job_id attribute: {type(attr)}"))
+
+        if 'source_case_id' in message_attributes:
+            attr = message_attributes['source_case_id']
+        if isinstance(attr, str):
+            source_case_id = attr
+        elif isinstance(attr, dict):
+            source_case_id = attr['stringValue'] if attr.get('dataType') == 'String' else attr.get('binaryValue')
+        else:
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Unexpected type for source_case_id attribute: {type(attr)}"))
+
+        if not job_id or not source_case_id:
+            logger.log_error(event=Constants.PROCESS_NAME, error=Exception("job_id and source_case_id are required"))
+            return {
+            'statusCode': 400,
+            'body': json.dumps({
+                'error': 'job_id and source_case_id are required',
+                'received_event': event
+            })
+            }
+
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Processing evidence for job_id: {job_id}, source_case_id: {source_case_id}, environment: {env_stage}", job_id=job_id)
+        results = process_case_evidence_with_sqs(job_id, source_case_id, context_data=base_context)
 
         logger.log_success(
             event="Case Detail Evidence Filter End",
