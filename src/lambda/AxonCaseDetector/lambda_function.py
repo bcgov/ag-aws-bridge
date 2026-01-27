@@ -190,7 +190,7 @@ def lambda_handler(event, context):
             if response.status == 200:
                 # Parse JSON response
                 json_data = json.loads(response.data.decode('utf-8'))
-                print(json_data)
+                
                  # Extract top-level meta information
                 meta = json_data.get("meta", {})
                 offset = meta.get("offset")
