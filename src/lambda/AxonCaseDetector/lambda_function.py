@@ -259,7 +259,12 @@ def lambda_handler(event, context):
                                     'Source_case_title': {
                                         'DataType': 'String',
                                         'StringValue': title
-                                    }      
+                                    },
+                                    'attempt_number':{
+                                        'DataType': 'Number',
+                                        'StringValue': '1'
+
+                                    }     
                                 }
                             )
                            # logger.log_sqs_message_sent(queue_url = queue_url, message_id=response, )
