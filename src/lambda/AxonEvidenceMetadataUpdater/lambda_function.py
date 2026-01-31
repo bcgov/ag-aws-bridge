@@ -258,7 +258,7 @@ def lambda_update_job_status( job_id: str, status_value: str, msg:str, process_n
         return False
 
 def update_evidence_status( evidence_ids:str)->bool:
-    job_status_code = db_manager.get_status_code_by_value(value=Constants.MET)
+    job_status_code = db_manager.get_status_code_by_value(value=Constants.METADATA_UPDATED_JOB_STATUS)
     try:
         if (job_status_code and evidence_ids):
             status_identifier = str(job_status_code["identifier"])

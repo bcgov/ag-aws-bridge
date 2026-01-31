@@ -1,5 +1,6 @@
 import csv
-from typing import Any, List
+from typing import Any, List, Dict
+from lambda_structured_logger import LogLevel, LogStatus
 from .models import OutputCSVRow
 from .exceptions import CSVWriteException
 
@@ -12,8 +13,9 @@ class OutputCSVWriter:
         'AGENCY FILE NAME', 'EVIDENCE ID', 'SHARING STATUS', 'CHECKSUM'
     ]
     
-    def __init__(self, logger: Any):
+    def __init__(self, logger: Any, event: Dict[str, Any]):
         self.logger = logger
+        self.event = event
     
     def write(self, filepath: str, rows: List[OutputCSVRow]) -> bool:
         """Write output CSV file"""
@@ -40,8 +42,9 @@ class OutputCSVWriter:
                     })
             
             self.logger.log(
-                event="output_csv_written",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Successfully wrote {len(rows)} rows to output CSV",
                 context_data={"filepath": filepath, "rows_count": len(rows)}
             )

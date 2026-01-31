@@ -1,17 +1,20 @@
-from typing import Any, List
+from typing import Any, List, Dict
+from lambda_structured_logger import LogLevel, LogStatus
 from .models import InputCSVRow
 
 class CSVCleaner:
     """Cleans CSV data by removing invalid/irrelevant rows"""
     
-    def __init__(self, logger: Any):
+    def __init__(self, logger: Any, event: Dict[str, Any]):
         self.logger = logger
+        self.event = event
     
     def clean(self, rows: List[InputCSVRow]) -> List[InputCSVRow]:
         """Execute cleaning pipeline"""
         self.logger.log(
-            event="csv_cleaning_started",
-            level="INFO",
+            event=self.event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
             message=f"Starting CSV cleanup with {len(rows)} rows"
         )
         
@@ -19,8 +22,9 @@ class CSVCleaner:
         rows = self.remove_work_product(rows)
         
         self.logger.log(
-            event="csv_cleaning_completed",
-            level="INFO",
+            event=self.event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
             message=f"CSV cleanup completed with {len(rows)} rows remaining"
         )
         
@@ -34,8 +38,9 @@ class CSVCleaner:
         
         if removed_count > 0:
             self.logger.log(
-                event="not_shared_rows_removed",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Removed {removed_count} 'Not Shared' rows"
             )
         
@@ -49,8 +54,9 @@ class CSVCleaner:
         
         if removed_count > 0:
             self.logger.log(
-                event="work_product_rows_removed",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Removed {removed_count} 'WORK PRODUCT' rows"
             )
         

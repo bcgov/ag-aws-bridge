@@ -129,39 +129,39 @@ Resources:
           - subnet-0e84012379d304b04
           - subnet-072de875489645b47
 
-  # AxonEvidenceDataPreparatorFunction:
-  #   Type: AWS::Serverless::Function
-  #   Properties:
-  #     FunctionName: !Sub "${AWS::StackName}-AxonEvidenceDataPreparatorFunction"
-  #     CodeUri: src/lambdas/axon-evidence-data-preparator
-  #     Handler: app/app.lambda_handler
-  #     Runtime: python3.11
-  #     Architectures:
-  #       - x86_64
-  #     Timeout: 300
-  #     Events:
-  #       SQSEvent:
-  #         Type: SQS
-  #         Properties:
-  #           Queue: arn:aws:sqs:ca-central-1:731386536779:q-transfer-prepare.fifo
-  #           BatchSize: 1
-  #           MaximumBatchingWindowInSeconds: 0
-  #     Layers:
-  #       - !Ref LambdaStructuredLoggerLayer
-  #       - !Ref BridgeTrackingDbLayer
-  #     Environment:
-  #       Variables:
-  #         ENV_STAGE: !Ref Environment
-  #     Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-evidence-data-preparator-role"
-  #     VpcConfig:
-  #       SecurityGroupIds:
-  #         - sg-048a4f967f32fc802
-  #         - sg-0f18545644fd98e9a
-  #         - sg-0143abb3cd912ef17
-  #         - sg-0e95635bffdfa0c34
-  #       SubnetIds:  # todo: use only the subnets needed
-  #         - subnet-0e84012379d304b04
-  #         - subnet-072de875489645b47
+  AxonEvidenceDataPreparatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-AxonEvidenceDataPreparatorFunction"
+      CodeUri: src/lambdas/axon-evidence-data-preparator
+      Handler: app/app.lambda_handler
+      Runtime: python3.11
+      Architectures:
+        - x86_64
+      Timeout: 300
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-transfer-prepare.fifo
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+      Layers:
+        - !Ref LambdaStructuredLoggerLayer
+        - !Ref BridgeTrackingDbLayer
+      Environment:
+        Variables:
+          ENV_STAGE: !Ref Environment
+      Role: !Sub "arn:aws:iam::731386536779:role/bridge-axon-evidence-data-preparator-role"
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-048a4f967f32fc802
+          - sg-0f18545644fd98e9a
+          - sg-0143abb3cd912ef17
+          - sg-0e95635bffdfa0c34
+        SubnetIds:  # todo: use only the subnets needed
+          - subnet-0e84012379d304b04
+          - subnet-072de875489645b47
 
   AxonEvidenceDataTransferorFunction:
     Type: AWS::Serverless::Function
@@ -234,11 +234,11 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-AxonEvidenceDownloaderFunction"
 
-  # AxonEvidenceDataPreparatorFunction:
-  #   Description: Evidence Data Preparator Lambda Function ARN
-  #   Value: !GetAtt AxonEvidenceDataPreparatorFunction.Arn
-  #   Export:
-  #     Name: !Sub "${AWS::StackName}-AxonEvidenceDataPreparatorFunction"
+  AxonEvidenceDataPreparatorFunction:
+    Description: Evidence Data Preparator Lambda Function ARN
+    Value: !GetAtt AxonEvidenceDataPreparatorFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AxonEvidenceDataPreparatorFunction"
 
   AxonEvidenceDataTransferorFunction:
     Description: Evidence Data Transferor Lambda Function ARN

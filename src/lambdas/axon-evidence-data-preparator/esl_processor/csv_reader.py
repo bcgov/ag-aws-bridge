@@ -1,5 +1,6 @@
 import csv
-from typing import List, Any
+from typing import List, Any, Dict
+from lambda_structured_logger import LogLevel, LogStatus
 from .models import InputCSVRow
 from .exceptions import CSVReadException
 
@@ -11,8 +12,9 @@ class InputCSVReader:
         'Evidence Checksum', 'release_status'
     ]
     
-    def __init__(self, logger: Any):
+    def __init__(self, logger: Any, event: Dict[str, Any]):
         self.logger = logger
+        self.event = event
     
     def read(self, filepath: str) -> List[InputCSVRow]:
         """Read input CSV file and parse into InputCSVRow objects"""
@@ -36,8 +38,9 @@ class InputCSVReader:
                         raise CSVReadException(f"Error parsing row {row_num}: {str(e)}")
             
             self.logger.log(
-                event="input_csv_read_success",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Successfully read {len(rows)} rows from input CSV",
                 context_data={"rows_count": len(rows)}
             )

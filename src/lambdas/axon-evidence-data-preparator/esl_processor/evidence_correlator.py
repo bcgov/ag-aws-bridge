@@ -1,6 +1,7 @@
 import json
 import urllib3
 from typing import Dict, List, Optional, Any
+from lambda_structured_logger import LogLevel, LogStatus
 from .models import EvidenceCorrelation
 from .exceptions import DataMappingException
 
@@ -8,10 +9,11 @@ from .exceptions import DataMappingException
 class EvidenceCorrelator:
     """Handles correlation between database evidence files and API responses"""
 
-    def __init__(self, base_url: str, bearer_token: str, agency_id: str, logger: Any):
+    def __init__(self, base_url: str, bearer_token: str, agency_id: str, logger: Any, event: Dict[str, Any]):
         self.base_url = base_url
         self.agency_id = agency_id
         self.logger = logger
+        self.event = event
         self.http = urllib3.PoolManager()
         self.headers = {
             'Authorization': f'Bearer {bearer_token}',
@@ -32,8 +34,9 @@ class EvidenceCorrelator:
 
             if not evidence_id or not checksum:
                 self.logger.log(
-                    event="correlation_missing_data",
-                    level="WARNING",
+                    event=self.event,
+                    level=LogLevel.WARNING,
+                    status=LogStatus.WARNING,
                     message=f"Missing evidence_id or checksum in database record: {db_record}",
                 )
                 continue
@@ -47,8 +50,9 @@ class EvidenceCorrelator:
             filename = self._extract_filename_from_api(api_data, evidence_file_id)
             if not filename:
                 self.logger.log(
-                    event="correlation_filename_not_found",
-                    level="WARNING",
+                    event=self.event,
+                    level=LogLevel.WARNING,
+                    status=LogStatus.WARNING,
                     message=f"No filename found for evidence_id: {evidence_id}, file_id: {evidence_file_id}",
                 )
                 continue
@@ -63,8 +67,9 @@ class EvidenceCorrelator:
             correlation_map[checksum] = correlation
 
             self.logger.log(
-                event="correlation_built",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Built correlation for checksum: {checksum[:16]}..., filename: {filename}",
             )
 
@@ -73,11 +78,12 @@ class EvidenceCorrelator:
     def _fetch_evidence_details(self, evidence_id: str) -> Optional[Dict]:
         """Fetch evidence details from Axon API"""
         try:
-            url = f"{self.base_url}/api/v2/agencies/{self.agency_id}/evidence/{evidence_id}"
-
+            url = f"{self.base_url}api/v2/agencies/{self.agency_id}/evidence/{evidence_id}"
+            print(f"Fetching evidence details from URL: {url}")
             self.logger.log(
-                event="api_call_start",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Making API call for evidence_id: {evidence_id}",
             )
 
@@ -85,8 +91,9 @@ class EvidenceCorrelator:
 
             if response.status != 200:
                 self.logger.log(
-                    event="api_call_error",
-                    level="ERROR",
+                    event=self.event,
+                    level=LogLevel.ERROR,
+                    status=LogStatus.FAILURE,
                     message=f"API call failed for evidence_id: {evidence_id}, status: {response.status}",
                 )
                 return None
@@ -95,8 +102,9 @@ class EvidenceCorrelator:
 
         except Exception as e:
             self.logger.log(
-                event="api_call_exception",
-                level="ERROR",
+                event=self.event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
                 message=f"Exception during API call for evidence_id: {evidence_id}: {str(e)}",
             )
             return None
@@ -122,8 +130,9 @@ class EvidenceCorrelator:
 
         except Exception as e:
             self.logger.log(
-                event="filename_extraction_error",
-                level="ERROR",
+                event=self.event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
                 message=f"Error extracting filename from API data: {str(e)}",
             )
 
