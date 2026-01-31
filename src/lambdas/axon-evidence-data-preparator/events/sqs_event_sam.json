@@ -3,7 +3,7 @@
     {
       "messageId": "test-message-123",
       "receiptHandle": "test-receipt-handle",
-      "body": "{\"job_id\": \"a75ac1a6-2bca-49be-971e-247baf0f78bc\"}",
+      "body": "{\"job_id\": \"9ac2505b-cdd5-4fdf-a488-89a8a102df2a\"}",
       "attributes": {
         "ApproximateReceiveCount": "1",
         "SentTimestamp": "1693123456789",
@@ -12,7 +12,7 @@
       },
       "messageAttributes": {
         "JobId": {
-          "stringValue": "a75ac1a6-2bca-49be-971e-247baf0f78bc",
+          "stringValue": "9ac2505b-cdd5-4fdf-a488-89a8a102df2a",
           "dataType": "String"
         }
       },

@@ -12,8 +12,122 @@ import urllib3
 import json as json_lib
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from bridge_tracking_db_layer import get_db_manager, StatusCodes
+from esl_processor.processor import ESLProcessor
+from app.transfer_package_manager import TransferPackageManager
 
 ssm_client = boto3.client("ssm")
+
+
+def fetch_share_logs(agency_id: str, case_id: str, base_url: str, bearer_token: str, logger: Any, event: Dict[str, Any], env_stage: str) -> Dict[str, Any]:
+    """Fetch share logs from Axon API."""
+    url = f"{base_url}api/v3/agencies/{agency_id}/cases/{case_id}/relationships/share-logs?shareType=0"
+    print(f"url {url}")
+    headers = {
+        'Authorization': f'Bearer {bearer_token}',
+        'Content-Type': 'application/json'
+    }
+    http = urllib3.PoolManager()
+    try:
+        response = http.request('GET', url, headers=headers, timeout=30.0)
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="fetch_share_logs_response",
+            context_data={"env_stage": env_stage, "status": response.status, "data_length": len(response.data) if response.data else 0}
+        )
+        if response.status == 404:
+            # No share logs found, return empty data
+            logger.log(
+                event=event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
+                message="fetch_share_logs_not_found",
+                context_data={"env_stage": env_stage, "status": response.status, "message": "No share logs found for the case"}
+            )
+            return {"data": []}
+        if response.status != 200:
+            raise urllib3.exceptions.HTTPError(f"HTTP {response.status}: {response.data.decode('utf-8')}")
+        return json_lib.loads(response.data.decode('utf-8'))
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="fetch_share_logs_error",
+            context_data={"error": str(e), "env_stage": env_stage}
+        )
+        raise
+
+
+def generate_share_log_report(agency_id: str, case_id: str, share_log_id: str, base_url: str, bearer_token: str, logger: Any, event: Dict[str, Any], env_stage: str) -> bool:
+    """Generate share log report if not exists."""
+    url = f"{base_url}api/v3/agencies/{agency_id}/cases/{case_id}/relationships/share-logs/{share_log_id}/share-log-reports"
+    headers = {
+        'Authorization': f'Bearer {bearer_token}',
+        'Content-Type': 'application/json'
+    }
+    body = json_lib.dumps({
+        "data": {
+            "type": "shareLogReport",
+            "attributes": {
+                "format": "csv"
+            }
+        }
+    })
+    http = urllib3.PoolManager()
+    try:
+        response = http.request('POST', url, headers=headers, body=body, timeout=30.0)
+        print(f"POST call to {url} body: {body}")
+
+        response_data = json_lib.loads(response.data.decode('utf-8')) if response.data else {}
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="generate_share_log_report_response",
+            context_data={"env_stage": env_stage, "status": response.status, "share_log_id": share_log_id, "response": response_data}
+        )
+        if "errors" in response_data and any("detail" in error for error in response_data.get("errors", [])):
+            raise urllib3.exceptions.HTTPError(f"API Error: {json_lib.dumps(response_data['errors'])}")
+        if response.status not in [200, 500]:  # 500 if already generated
+            raise urllib3.exceptions.HTTPError(f"HTTP {response.status}: {response.data.decode('utf-8')}")
+        return response.status == 200
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="generate_share_log_report_error",
+            context_data={"error": str(e), "env_stage": env_stage}
+        )
+        raise
+
+
+def download_share_log_csv(agency_id: str, case_id: str, share_log_id: str, report_id: str, base_url: str, bearer_token: str, output_path: str, logger: Any, event: Dict[str, Any], env_stage: str) -> bool:
+    """Download share log CSV."""
+    url = f"{base_url}api/v3/agencies/{agency_id}/cases/{case_id}/relationships/share-logs/{share_log_id}/share-log-reports/{report_id}"
+    headers = {
+        'Authorization': f'Bearer {bearer_token}',
+    }
+    http = urllib3.PoolManager()
+    try:
+        print(f"Downloading share log CSV from {url} to {output_path}")
+        response = http.request('GET', url, headers=headers, timeout=30.0)
+        if response.status != 200:
+            raise urllib3.exceptions.HTTPError(f"HTTP {response.status}: {response.data.decode('utf-8')}")
+        with open(output_path, 'wb') as f:
+            f.write(response.data)
+        return True
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="download_share_log_csv_error",
+            context_data={"error": str(e), "env_stage": env_stage}
+        )
+        raise
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -93,6 +207,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         source_case_title = case_info.get('source_case_title')
         if source_case_title is None:
             raise ValueError(f"Invalid Source Case Title: {source_case_title}")
+        source_case_id = case_info.get('source_case_id')
+        if source_case_id is None:
+            raise ValueError(f"Invalid Source Case ID: {source_case_id}")
         logger.log(
             event=event,
             level=LogLevel.INFO,
@@ -104,15 +221,130 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             },
         )
 
-        # Generate CSV log file
-        csv_result = generate_csv_log_file(
-            job_id=job_id,
-            source_case_title=source_case_title,
+        # Retrieve source agency
+        source_agency = db_manager.get_source_agency(job_id)
+        if source_agency is None:
+            raise ValueError(f"Invalid Source Agency: {source_agency}")
+        agency_id = source_agency
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="axon_evidence_data_preparator_source_agency",
+            context_data={
+                "env_stage": env_stage,
+                "source_agency": f"{source_agency}",
+            },
+        )
+
+        # Fetch share logs
+        share_logs_response = fetch_share_logs(agency_id, source_case_id, ssm_parameters["base_url"], ssm_parameters["bearer"], logger, event, env_stage)
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="share_logs_response_received",
+            context_data={"env_stage": env_stage, "response_type": type(share_logs_response).__name__, "has_data": "data" in share_logs_response if isinstance(share_logs_response, dict) else False}
+        )
+        share_logs = share_logs_response.get("data", [])
+        if not share_logs:
+            raise ValueError("No share logs found")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="share_logs_found",
+            context_data={"env_stage": env_stage, "share_logs_count": len(share_logs), "first_log_type": type(share_logs[0]).__name__ if share_logs else "none"}
+        )
+        
+        # Find most recent share log
+        most_recent = max(share_logs, key=lambda x: x["attributes"]["createdDate"])
+        share_log_id = most_recent["id"]
+        print(f"Most recent share log ID: {share_log_id}")
+        share_log_name = most_recent["attributes"]["name"]
+        share_log_reports = most_recent.get("relationships", {}).get("shareLogReports", {}).get("data", [])
+        
+        if share_log_reports:
+            report_id = share_log_reports[0]["id"]
+            print(f"Using existing report ID: {report_id}")
+        else:
+            # Generate report
+            generate_share_log_report(agency_id, source_case_id, share_log_id, ssm_parameters["base_url"], ssm_parameters["bearer"], logger, event, env_stage)
+            # Re-fetch
+            share_logs_response = fetch_share_logs(agency_id, source_case_id, ssm_parameters["base_url"], ssm_parameters["bearer"], logger, event, env_stage)
+            logger.log(
+                event=event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
+                message="share_logs_response_received",
+                context_data={"env_stage": env_stage, "response_type": type(share_logs_response).__name__, "has_data": "data" in share_logs_response if isinstance(share_logs_response, dict) else False}
+            )   
+            most_recent = max(share_logs_response.get("data", []), key=lambda x: x["attributes"]["createdDate"])
+            share_log_reports = most_recent.get("relationships", {}).get("shareLogReports", {}).get("data", [])
+            if not share_log_reports:
+                raise ValueError("Failed to generate share log report")
+            report_id = share_log_reports[0]["id"]
+        
+        # Download CSV
+        input_csv_path = f"/tmp/{share_log_name}.csv"
+        download_share_log_csv(agency_id, source_case_id, share_log_id, report_id, ssm_parameters["base_url"], ssm_parameters["bearer"], input_csv_path, logger, event, env_stage)
+
+        # Generate timestamp in YYMMDDHHMMSS format
+        timestamp = datetime.now().strftime('%y%m%d%H%M%S')
+        
+        # Create filename: ESL_source_case_title_YYMMDDHHMMSS.csv
+        filename = f"ESL_{source_case_title}_{timestamp}.csv"
+        filepath = f"/tmp/{filename}"
+
+        # Get agency_id_code from DB for this job
+        job_details = db_manager.get_evidence_transfer_job(job_id)
+        agency_id_code = job_details.get("agency_id_code") if job_details else None
+        if not agency_id_code:
+            raise ValueError(f"Missing agency_id_code for job_id {job_id}")
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="axon_evidence_data_preparator_agency_id_code",
+            context_data={
+                "env_stage": env_stage,
+                "agency_id_code": agency_id_code,
+                "job_id": job_id,
+            },
+        )
+
+        # Process with ESLProcessor
+        processor = ESLProcessor(
+            db_manager=db_manager,
+            agency_id_code=agency_id_code,
             logger=logger,
             event=event,
-            env_stage=env_stage,
-            ssm_parameters=ssm_parameters,
+            base_url=ssm_parameters["base_url"],
+            bearer_token=ssm_parameters["bearer"],
+            agency_id=agency_id
         )
+        success, message = processor.process(
+            input_csv_path,
+            filepath,
+            job_id
+        )
+        if not success:
+            raise Exception(f"ESLProcessor failed: {message}")
+
+        # Verify file was created and get file size
+        if not os.path.exists(filepath):
+            raise Exception(f"Output file was not created successfully at {filepath}")
+            
+        file_size = os.path.getsize(filepath)
+
+        csv_result = {
+            'filename': filename,
+            'filepath': filepath,
+            'file_size': file_size,
+            'records_count': None,  # Could parse from message if needed
+            'creation_timestamp': timestamp
+        }
 
         logger.log(
             event=event,
@@ -124,6 +356,30 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "csv_filename": csv_result.get("filename"),
                 "csv_filepath": csv_result.get("filepath"),
                 "file_size": csv_result.get("file_size"),
+            },
+        )
+
+        # Stream-zip all evidence files from S3 + CSV from local /tmp into one zip
+        tpm = TransferPackageManager(logger=logger, env_stage=env_stage)
+        zip_result = tpm.create_and_upload_zip_stream(
+            ssm_parameters=ssm_parameters,
+            case_info=case_info,
+            job_id=job_id,
+            csv_filename=csv_result['filename'],
+            csv_filepath=csv_result['filepath'],
+            event=event,
+        )
+        if not zip_result.get('success'):
+            raise Exception(f"Stream-zip to S3 failed: {zip_result.get('error')}")
+
+        logger.log(
+            event=event,
+            level=1,  # LogLevel.INFO
+            status=1,  # LogStatus.SUCCESS
+            message="transfer_package_zipped_success",
+            context_data={
+                "job_id": job_id,
+                "zip_s3_uri": zip_result.get('zip_s3_uri'),
             },
         )
 
@@ -247,6 +503,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "job_id": job_id if job_id else "unknown",
             },
         )
+        logger.log_error(event=f"preparator_fail_{job_id}", error=e)
+
 
         return {
             "statusCode": 500, 
@@ -279,6 +537,7 @@ def get_ssm_parameters(
         "base_url": f"/{env_stage}/axon/api/base_url",
         "transfer_prepare_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-data-transfer",
         "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
+        "bridge_s3_bucket": f"/{env_stage}/bridge/s3/bridge-transient-data-transfer-s3",
     }
 
     parameters = {}
@@ -475,7 +734,7 @@ def generate_csv_log_file(
         logger.log(
             event=event,
             level=LogLevel.ERROR,
-            status=LogStatus.ERROR,
+            status=LogStatus.FAILURE,
             message="axon_evidence_data_preparator_csv_creation_error",
             context_data={
                 "env_stage": env_stage,
@@ -675,7 +934,7 @@ def prepare_csv_data(
             logger.log(
                 event=event,
                 level=LogLevel.ERROR,
-                status=LogStatus.ERROR,
+                status=LogStatus.FAILURE,
                 message="axon_evidence_data_preparator_api_call_error",
                 context_data={
                     "env_stage": env_stage,
@@ -689,7 +948,7 @@ def prepare_csv_data(
             logger.log(
                 event=event,
                 level=LogLevel.ERROR,
-                status=LogStatus.ERROR,
+                status=LogStatus.FAILURE,
                 message="axon_evidence_data_preparator_parse_error",
                 context_data={
                     "env_stage": env_stage,

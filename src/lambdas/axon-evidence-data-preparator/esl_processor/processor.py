@@ -1,4 +1,6 @@
 from typing import Any, Dict, Tuple, List
+
+from lambda_structured_logger.enums import LogLevel, LogStatus
 from .exceptions import CSVValidationException
 from .csv_reader import InputCSVReader
 from .csv_cleaner import CSVCleaner
@@ -9,19 +11,20 @@ from .evidence_correlator import EvidenceCorrelator
 class ESLProcessor:
     """Main orchestrator for ESL CSV processing pipeline"""
     
-    def __init__(self, db_manager: Any, agency_id_code: str, logger: Any, base_url: str = None, bearer_token: str = None, agency_id: str = None):
+    def __init__(self, db_manager: Any, agency_id_code: str, logger: Any, event: Dict[str, Any], base_url: str = None, bearer_token: str = None, agency_id: str = None):
         self.db_manager = db_manager
         self.agency_id_code = agency_id_code
         self.logger = logger
+        self.event = event
         self.base_url = base_url
         self.bearer_token = bearer_token
         self.agency_id = agency_id
         
-        self.reader = InputCSVReader(logger)
-        self.cleaner = CSVCleaner(logger)
-        self.mapper = DataMapper(db_manager, agency_id_code, logger)
-        self.writer = OutputCSVWriter(logger)
-        self.correlator = EvidenceCorrelator(base_url, bearer_token, agency_id, logger) if all([base_url, bearer_token, agency_id]) else None
+        self.reader = InputCSVReader(logger, event)
+        self.cleaner = CSVCleaner(logger, event)
+        self.mapper = DataMapper(db_manager, agency_id_code, logger, event)
+        self.writer = OutputCSVWriter(logger, event)
+        self.correlator = EvidenceCorrelator(base_url, bearer_token, agency_id, logger, event) if all([base_url, bearer_token, agency_id]) else None
     
     def process(
         self, 
@@ -37,8 +40,9 @@ class ESLProcessor:
         """
         try:
             self.logger.log(
-                event="esl_processing_started",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=f"Starting ESL processing for job_id: {job_id}"
             )
             
@@ -60,8 +64,9 @@ class ESLProcessor:
                 self._validate_correlation(cleaned_rows, correlation_map)
             else:
                 self.logger.log(
-                    event="correlation_validation_skipped",
-                    level="WARNING",
+                    event=self.event,
+                    level=LogLevel.WARNING,
+                    status=LogStatus.WARNING,
                     message="Correlation validation skipped - no API credentials provided"
                 )
             
@@ -80,8 +85,9 @@ class ESLProcessor:
             )
             
             self.logger.log(
-                event="esl_processing_completed",
-                level="INFO",
+                event=self.event,
+                level=LogLevel.INFO,
+                status=LogStatus.SUCCESS,
                 message=message
             )
             
@@ -90,8 +96,9 @@ class ESLProcessor:
         except Exception as e:
             error_msg = f"ESL processing failed: {str(e)}"
             self.logger.log(
-                event="esl_processing_error",
-                level="ERROR",
+                event=self.event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
                 message=error_msg,
                 context_data={"error_type": type(e).__name__}
             )
@@ -106,8 +113,9 @@ class ESLProcessor:
         """Build correlation map between database records and API data"""
         if not self.correlator:
             self.logger.log(
-                event="correlation_skipped",
-                level="WARNING",
+                event=self.event,
+                level=LogLevel.WARNING,
+                status=LogStatus.WARNING,
                 message="EvidenceCorrelator not initialized - missing API credentials"
             )
             return {}
@@ -118,8 +126,11 @@ class ESLProcessor:
         """Validate that CSV rows can be correlated with database records via checksum"""
         missing_correlations = []
         
+        # Create a case-insensitive lookup map
+        correlation_map_lower = {k.lower(): v for k, v in correlation_map.items()}
+        
         for csv_row in csv_rows:
-            if csv_row.checksum not in correlation_map:
+            if csv_row.checksum.lower() not in correlation_map_lower:
                 missing_correlations.append(csv_row.checksum)
         
         if missing_correlations:

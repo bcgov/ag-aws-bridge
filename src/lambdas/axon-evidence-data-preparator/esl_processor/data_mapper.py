@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
+from lambda_structured_logger import LogLevel, LogStatus
 from .models import InputCSVRow, OutputCSVRow, EvidenceCorrelation
 from .exceptions import DataMappingException
 
@@ -8,10 +9,11 @@ from .exceptions import DataMappingException
 class DataMapper:
     """Maps input CSV data to output CSV format"""
 
-    def __init__(self, db_manager: Any, agency_id_code: str, logger: Any):
+    def __init__(self, db_manager: Any, agency_id_code: str, logger: Any, event: Dict[str, Any]):
         self.db_manager = db_manager
         self.agency_id_code = agency_id_code
         self.logger = logger
+        self.event = event
 
     def map_rows(
         self,
@@ -22,24 +24,25 @@ class DataMapper:
         """Map cleaned CSV rows with database records and correlation data to output format"""
         output_rows = []
 
-        # Create checksum-based lookup for database records
-        db_lookup = {record.get('checksum'): record for record in db_records if record.get('checksum')}
+        # Create case-insensitive checksum-based lookup for database records
+        db_lookup = {record.get('checksum').lower(): record for record in db_records if record.get('checksum')}
 
         for csv_row in csv_rows:
-            db_record = db_lookup.get(csv_row.checksum)
+            db_record = db_lookup.get(csv_row.checksum.lower())
             if not db_record:
                 raise DataMappingException(
                     f"No database record found for checksum: {csv_row.checksum}"
                 )
 
-            # Get correlation data for relative_file_path
-            correlation = correlation_map.get(csv_row.checksum)
+            # Get correlation data for relative_file_path (case-insensitive)
+            correlation = correlation_map.get(csv_row.checksum.lower())
             if correlation:
                 csv_row.relative_file_path = correlation.filename
             else:
                 self.logger.log(
-                    event="correlation_missing",
-                    level="WARNING",
+                    event=self.event,
+                    level=LogLevel.WARNING,
+                    status=LogStatus.WARNING,
                     message=f"No correlation data found for checksum: {csv_row.checksum}, using empty relative_file_path"
                 )
 
@@ -262,16 +265,18 @@ class DataMapper:
                     continue
 
             self.logger.log(
-                event="date_conversion_failed",
-                level="WARNING",
+                event=self.event,
+                level=LogLevel.WARNING,
+                status=LogStatus.WARNING,
                 message=f"Could not parse shared_on date: {shared_on_str}",
             )
             return ""
 
         except Exception as e:
             self.logger.log(
-                event="date_conversion_error",
-                level="ERROR",
+                event=self.event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
                 message=f"Error converting shared_on date: {str(e)}",
             )
             return ""
