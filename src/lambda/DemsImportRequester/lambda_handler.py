@@ -9,7 +9,7 @@ import botocore.exceptions
 import random
 import string
 
-from datetime import datetime
+from datetime import datetime,timezone
 from botocore.config import Config
 
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
@@ -23,21 +23,21 @@ class Constants:
     REGION_NAME = "ca-central-1"
     AGENCY_LOOKUP_TABLE_NAME = "agency-lookups"
     HTTP_OK_CODE = 200,
+    HTTP_ERROR_CODE = 400,
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
 
 class DemsImportRequester:
     """Main class to call the EDT create-load-file-import API to initiate "import" of evidence within EDT's S3 bucket to the particular, relevant target DEMS case"""
-
     def __init__(self, env_stage: str, logger: LambdaStructuredLogger, job_id: str):
-        """Initialize the validator with environment stage, logger, and job ID."""
-        self.env_stage = env_stage
-        self.logger = logger
-        self.job_id = job_id
-        self.ssm_client, self.sqs_client, self.agency_code_table = self._initialize_aws_clients()
-        self.db_manager = get_db_manager(env_param_in=env_stage)
-        self.db_manager._initialize_pool()
-        self.http = self._initialize_http_pool()
-        self.parameters = self._get_ssm_parameters()
+            """Initialize the validator with environment stage, logger, and job ID."""
+            self.env_stage = env_stage
+            self.logger = logger
+            self.job_id = job_id
+            self.ssm_client, self.sqs_client, self.agency_code_table = self._initialize_aws_clients()
+            self.db_manager = get_db_manager(env_param_in=env_stage)
+            self.db_manager._initialize_pool()
+            self.http = self._initialize_http_pool()
+            self.parameters = self._get_ssm_parameters()
 
     def _initialize_aws_clients(self) -> tuple:
         """Initialize AWS clients and resources with custom configuration."""
@@ -65,6 +65,7 @@ class DemsImportRequester:
             f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception',
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import',
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status',
+            f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries'
         ]
         
         try:
@@ -130,16 +131,22 @@ class DemsImportRequester:
         
             return val.get('stringValue') or val.get('binaryValue')
 
-        job_id = get_attr('job_id')
+        job_id = get_attr('job_id') or get_attr('JobId') or get_attr('jobid')
         sourcePath = get_attr('sourcePath') or get_attr('SourcePath') or get_attr('source_path')
-        dems_case_id = get_attr('dems_case_id')
+        dems_case_id = get_attr('dems_case_id') or get_attr('demscaseid') or get_attr('DemsCaseId')
         destinationPath = get_attr('destinationPath') or get_attr('DestinationPath')
+        first_attempt_time = get_attr('first_attempt_time') or get_attr('FirstAttemptTime')
+        last_attempt_time = get_attr('last_attempt_time') or get_attr('LastAttemptTime')
+        attempt_number = get_attr('attempt_number') or get_attr('AttemptNumber')
 
         required = {
             "job_id": job_id,
             "sourcePath": sourcePath,
             "dems_case_id": dems_case_id,
             "destinationPath": destinationPath,
+            "first_attempt_time" : first_attempt_time,
+            "last_attempt_time"  : last_attempt_time,
+            "attempt_number"     : attempt_number
         }
 
         missing = [k for k, v in required.items() if not v]
@@ -147,10 +154,13 @@ class DemsImportRequester:
             
             raise ValueError(f"Missing required field(s): {', '.join(missing)}")
 
-        return job_id, sourcePath, dems_case_id, destinationPath
+        attempt_number_int = int(attempt_number)
+        #job_id, sourcePath, dems_case_id,destinationPath, first_attempt_time, last_attempt_time, attempt_number
+        return job_id, sourcePath, dems_case_id, destinationPath, first_attempt_time, last_attempt_time,attempt_number_int
 
-    def callEDTDemsApi( self, job_id, dems_case_id, imagePath)->str:
+    def callEDTDemsApi( self, destinationPath:str, first_attempt_time:str, last_attempt_time:str, attempt_number:int,job_id, dems_case_id, imagePath)->str:
         import_id = None
+        max_attempt_count = int(self.parameters[f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries'])
         try:
             api_url = self.parameters[f'/{self.env_stage}/edt/api/import_url']
             api_url = api_url.replace("$$$$", dems_case_id)
@@ -177,7 +187,7 @@ class DemsImportRequester:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"EDT API call failed, Exception: {str(e)}"))
                 return None
 
-            if api_response.status < 400:
+            if api_response.status < Constants.HTTP_ERROR_CODE:
 
                 self.logger.log_api_call(
                 event="DEMS EDT create Import Report API call",
@@ -191,25 +201,62 @@ class DemsImportRequester:
                 try:
                     json_data = api_response.json()
                     import_id =  json_data.get("importId")
-                
-          
                 except ValueError as e:
                     self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Failed to parse JSON response: {str(e)}"))
                     raise
-            elif api_response.status >= 400:
-                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
-                 return None
+            elif api_response.status >= Constants.HTTP_ERROR_CODE:
+                if max_attempt_count > attempt_number:
+                    queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status']
+                    current_timestamp = datetime.now()
+                    attempt_number = attempt_number +1
+                    self.send_sqs_message(queue_url, job_id, first_attempt_time, last_attempt_time,attempt_number,dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath="",
+                                           current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
+                   
+                elif max_attempt_count == attempt_number:
+                    queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception']
+                    current_timestamp = datetime.now()
+                    job_msg = "dems import request failed; maximum attempts"
+                    self.process_exception_message(job_id, job_msg)
+                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Import attempt max count exceeded."))
+                    return None
             
             if not json_data:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
                 return
-
             return import_id
 
         except Exception as e:
             error_msg = f"EDTDEMS API lookup failed for job_id: {job_id} or importname: {importName}. Error: {str(e)}"
             self.logger.log_error(event="EDTDEMS API lookup Failed", error=error_msg, job_id=self.job_id)
             raise
+
+    def process_exception_message(self, job_id:str, message_handle:str, source_case_title:str, job_msg:str, source_queue_url:str )->bool:
+        status_code = "IMPORT_FAILED"
+
+        self.update_job_status(job_id,status_code, None, None,job_msg)
+        current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+        self.logger.log(
+                    function="axonRccAndDemsCaseValidator",
+                    event=Constants.PROCESS_NAME,
+                    status=Constants.ERROR,
+                    message=job_msg,
+                    job_id=job_id,
+                    custom_metadata=[{"job_id" : job_id}]
+                )
+    
+        self.sqs_client.delete_message(
+                    QueueUrl=source_queue_url,
+                    ReceiptHandle=message_handle
+                )
+        self.logger.info(f"Deleted message: {message_handle}")
+        message_attributes = {
+            "job_id"                        : job_id,
+            "source_case_title"             : source_case_title,
+            "exception_agency_match"        : current_timestamp
+
+         }
+        self.send_sqs_message('q-transfer-exception.fifo', job_id, None, current_timestamp, Exception("Download attempt max exceeded"), None, message_attributes=message_attributes)
 
     def call_dems_api(self, dems_api_url: str, bearer_token: str, agency_code: str,
                       agency_file_number: str) -> tuple:
@@ -237,7 +284,7 @@ class DemsImportRequester:
         
         return api_response.status, api_response.data.decode('utf-8').strip()
 
-    def update_job_status(self, job_id: str, status_value: str, agency_id_code:str, agency_file_number:str):
+    def update_job_status(self, job_id: str, status_value: str, agency_id_code:str, agency_file_number:str, job_msg:str):
         """Update job status in the database."""
         update_job_status = self.db_manager.get_status_code_by_value(value=status_value)
         if update_job_status:
@@ -245,12 +292,13 @@ class DemsImportRequester:
             self.db_manager.update_job_status(
                 job_id=job_id,
                 status_code=status_identifier,
-                job_msg="Called dems edt import requester",
+                job_msg=job_msg,
                 last_modified_process="lambda: dems import requester"
             )
 
     def update_evidence_files_import_requested(self, status:str, job_id:str):
         """Update job status in the database."""
+
         update_job_status = self.db_manager.get_status_code_by_value(value=status)
         file_status_updates_tuple : List[Tuple[str,int]]  # define a list of Tuples<evidence_id, status_code> to update
         if update_job_status:
@@ -271,14 +319,14 @@ class DemsImportRequester:
                         self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
 
     def send_sqs_message(self, queue_url: str, job_id: str, dems_case_id: str, dems_import_job_id:str,
-                         current_timestamp: str,sourcePath:str, custom_exception: Exception = None):
+                         current_timestamp: str,sourcePath:str,first_attempt_time:str, last_attempt_time:str,attempt_number:int, custom_exception: Exception = None):
         """Send message to SQS queue."""
         # Define the alphanumeric character pool
         alphanumeric_chars = string.ascii_letters + string.digits
 
         # Generate a random string of 20 characters
         random_string = ''.join(random.choices(alphanumeric_chars, k=20))
-
+        attempt_number = attempt_number + 1
         try:
            
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
@@ -287,7 +335,10 @@ class DemsImportRequester:
                 'Job_id': {'DataType': 'String', 'StringValue': job_id},
                 'dems_case_id': {'DataType': 'String', 'StringValue': dems_case_id},
                 'dems_import_job_id' : {'DataType': 'String', 'StringValue': dems_import_job_id},
-                'sourcePath' : {'DataType': 'String', 'StringValue': sourcePath }
+                'sourcePath' : {'DataType': 'String', 'StringValue': sourcePath },
+                'first_attempt_time' : {'DataType': 'String', 'StringValue': first_attempt_time},
+                'last_attempt_time' : {'DataType' : 'String', 'StringValue' : last_attempt_time},
+                'attempt_number' : {'DataType' : 'String', 'StringValue' : str(attempt_number)}
             }
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
@@ -330,18 +381,20 @@ class DemsImportRequester:
     def process_message(self, message: dict):
         """Process a single SQS message."""
         try:
-            self.parse_message_attributes(message)
+            #self.parse_message_attributes(message)
 
             job_id = ""
             dems_case_id=""
             destinationPath=""
             import_id=""
             sourcePath=""
-            
+            first_attempt_time = ""
+            attempt_number = 0
+            last_attempt_time = ""
             receipt_handle = message['receiptHandle']
             messageId = message["messageId"]
             try:
-                job_id, sourcePath, dems_case_id,destinationPath = self.parse_message_attributes(message)
+                job_id, sourcePath, dems_case_id,destinationPath, first_attempt_time, last_attempt_time, attempt_number = self.parse_message_attributes(message)
                  
             except Exception as e:
                 self.logger.log_error(
@@ -353,7 +406,7 @@ class DemsImportRequester:
                 )
                 return  # Abort processing early
 
-            if not all([job_id, dems_case_id, destinationPath,sourcePath]):
+            if not all([job_id, dems_case_id, destinationPath,sourcePath, first_attempt_time, last_attempt_time,attempt_number]):
                 self.logger.log_error(
                 event="Invalid Message Data",
                 message="Missing required fields after parsing",
@@ -365,7 +418,7 @@ class DemsImportRequester:
             import_id: Optional[str] = None
             
             try:
-                import_id = self.callEDTDemsApi(job_id, dems_case_id=dems_case_id, imagePath=sourcePath )
+                import_id = self.callEDTDemsApi(destinationPath, first_attempt_time, last_attempt_time, attempt_number,job_id, dems_case_id=dems_case_id, imagePath=sourcePath )
             except Exception as mImportIdEx:
                  self.logger.log(
                     event="EDT Dems Import Requester",
@@ -374,7 +427,6 @@ class DemsImportRequester:
                     job_id=job_id,
                     custom_metadata={"dems_case_id": dems_case_id, "import_file_path": sourcePath}
                     )
-
             try:
                 
                 if import_id: 
@@ -386,7 +438,8 @@ class DemsImportRequester:
             # Update job status
             try:
                 if import_id:
-                    self.update_job_status(str(Constants.IMPORT_REQUESTED),job_id)
+                    job_msg= "Called dems edt import requester"
+                    self.update_job_status(str(Constants.IMPORT_REQUESTED),job_id, job_msg)
             except Exception as fileUpdate:
                 self.logger.log_error(event="Update Job Status", message="Job Status Update Failed for Message ID:" + messageId, error=str(fileUpdate), job_id=self.job_id)
                 return
@@ -396,7 +449,7 @@ class DemsImportRequester:
                 if import_id:
                     queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status']
                     current_timestamp = datetime.now()
-                    self.send_sqs_message(queue_url, job_id, dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath=sourcePath,
+                    self.send_sqs_message(queue_url, job_id, first_attempt_time, last_attempt_time,attempt_number,dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath=sourcePath,
                                            current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
             except Exception as sqs_exception:
                 self.logger.log_error(event="SQS Message Sending Failed", error=str(msg_err), job_id=self.job_id)
@@ -446,9 +499,7 @@ def lambda_handler(event, context):
         for record in event["Records"]:
             attrs = record.get('messageAttributes', {})
             
-            # DEBUG: Remove this after confirming it works
-            #print("messageAttributes keys:", list(attrs.keys()))
-
+           
             # Helper to safely extract string value
             def get_value(key):
                 attr = attrs.get(key)
@@ -472,7 +523,7 @@ def lambda_handler(event, context):
                 error_msg = f"Missing required message attributes: {', '.join(missing)}"
                 logger.log_error(event=Constants.PROCESS_NAME, error=Exception(error_msg), job_id=job_id or "unknown")
                 return {
-                    'statusCode': 400,
+                    'statusCode': Constants.HTTP_ERROR_CODE,
                     'body': json.dumps({
                         'error': error_msg,
                         'available_attributes': list(attrs.keys()),
