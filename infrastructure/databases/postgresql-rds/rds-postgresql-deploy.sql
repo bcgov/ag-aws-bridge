@@ -123,6 +123,8 @@ INSERT INTO status_codes VALUES
 (81, 'IMPORT-REQUESTED', 81, 'Import requested', 'BOTH'),
 (82, 'IMPORTED', 82, 'Successfully imported', 'BOTH'),
 (83, 'IMPORT-FAILED', 83, 'Import failed', 'BOTH'),
+(84, 'IMPORTED-WITH-ERRORS', 140,'Import completed with errors or warnings','BOTH'),
+(22, 'INVALID-AGENCY-IDENTIFIER', '22', 'Axon case title does not match BCPS agency listing', 'JOB');
 
 -- Final states
 (100, 'COMPLETED', 100, 'Processing completed successfully', 'BOTH'),
