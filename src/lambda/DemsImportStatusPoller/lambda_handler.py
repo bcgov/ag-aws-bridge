@@ -134,7 +134,7 @@ class DemsImportStatusPoller:
         job_id = get_attr('job_id')
         sourcePath = get_attr('sourcePath') or get_attr('SourcePath') or get_attr('source_path')
         dems_case_id = get_attr('dems_case_id')
-        destinationPath = get_attr('destinationPath') or get_attr('DestinationPath')
+        destinationPath = get_attr('destination_path') or get_attr('DestinationPath')
 
         required = {
             "job_id": job_id,
@@ -285,7 +285,7 @@ class DemsImportStatusPoller:
                 'Job_id': {'DataType': 'String', 'StringValue': job_id},
                 'dems_case_id': {'DataType': 'String', 'StringValue': dems_case_id},
                 'dems_import_job_id' : {'DataType': 'String', 'StringValue': dems_import_job_id},
-                'sourcePath' : {'DataType': 'String', 'StringValue': sourcePath }
+                'source_path' : {'DataType': 'String', 'StringValue': sourcePath }
             }
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
@@ -456,14 +456,14 @@ def lambda_handler(event, context):
 
             job_id = get_value('job_id')
             dems_import_job_id = get_value('dems_import_job_id')
-            sourcePath = get_value('sourcePath')         
+            sourcePath = get_value('source_path')         
             dems_case_id = get_value('dems_case_id')
            
 
             # Validate all required fields
             missing = []
             if not job_id:          missing.append('job_id')
-            if not sourcePath:      missing.append('sourcePath')
+            if not sourcePath:      missing.append('source_path')
             if not dems_case_id:    missing.append('dems_case_id')
             if not dems_import_job_id: missing.append('dems_import_job_id')
 

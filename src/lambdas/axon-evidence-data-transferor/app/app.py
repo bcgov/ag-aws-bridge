@@ -1348,10 +1348,10 @@ def queue_success_message(
     message_data = {}
     
     if sourcePath is not None:
-        message_data['sourcePath'] = sourcePath
+        message_data['source_path'] = sourcePath
     
     if destinationPath is not None:
-        message_data['destinationPath'] = destinationPath
+        message_data['destination_path'] = destinationPath
     
     if dems_case_id is not None:
         message_data['dems_case_id'] = dems_case_id

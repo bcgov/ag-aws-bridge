@@ -123,7 +123,7 @@ class TransferProcessExceptionHandler:
         job_id = get_attr('job_id')
         sourcePath = get_attr('sourcePath') or get_attr('SourcePath') or get_attr('source_path')
         dems_case_id = get_attr('dems_case_id')
-        destinationPath = get_attr('destinationPath') or get_attr('DestinationPath')
+        destinationPath = get_attr('destination_path') or get_attr('DestinationPath')
 
         required = {
             "job_id": job_id,

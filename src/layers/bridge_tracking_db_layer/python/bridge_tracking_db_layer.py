@@ -479,15 +479,31 @@ class DatabaseManager:
         return self.execute_query_one(query, file_data, True)
     
     def update_evidence_file_state(self, evidence_id: str, state_code: int, 
-                                  last_modified_process: str) -> Dict:
-        """Update evidence file state."""
-        query = """
+                                  last_modified_process: str, evidence_id_source: str = None) -> Dict:
+        """Update evidence file state and optionally update evidence_id_source.
+        
+        Args:
+            evidence_id: The evidence file ID to update
+            state_code: New state code
+            last_modified_process: Process name for audit trail
+            evidence_id_source: Optional evidence ID from source CSV
+        """
+        updates = ["evidence_transfer_state_code = %s", "last_modified_process = %s", "last_modified_utc = NOW()"]
+        params = [state_code, last_modified_process]
+        
+        if evidence_id_source is not None:
+            updates.append("evidence_id_source = %s")
+            params.append(evidence_id_source)
+        
+        params.append(evidence_id)
+        
+        query = f"""
             UPDATE evidence_files 
-            SET evidence_transfer_state_code = %s, last_modified_process = %s, last_modified_utc = NOW()
+            SET {', '.join(updates)}
             WHERE evidence_id = %s 
             RETURNING *
         """
-        return self.execute_query_one(query, (state_code, last_modified_process, evidence_id), True)
+        return self.execute_query_one(query, tuple(params), True)
     
     def mark_file_downloaded(self, evidence_id: str, error_msg: str = None, 
                            last_modified_process: str = None) -> Dict:

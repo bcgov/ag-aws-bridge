@@ -7,6 +7,7 @@ from .csv_cleaner import CSVCleaner
 from .data_mapper import DataMapper
 from .csv_writer import OutputCSVWriter
 from .evidence_correlator import EvidenceCorrelator
+from .models import EvidenceCorrelation, InputCSVRow
 
 class ESLProcessor:
     """Main orchestrator for ESL CSV processing pipeline"""
@@ -31,12 +32,13 @@ class ESLProcessor:
         input_csv_path: str, 
         output_csv_path: str,
         job_id: str
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, Dict[str, str]]:
         """
         Process ESL CSV: read → clean → correlate → validate → map → write
         
         Returns:
-            Tuple of (success: bool, message: str)
+            Tuple of (success: bool, message: str, csv_evidence_id_map: Dict[str, str])
+            where csv_evidence_id_map maps checksum -> evidence_id from input CSV
         """
         try:
             self.logger.log(
@@ -53,6 +55,9 @@ class ESLProcessor:
             # Step 2: Clean CSV
             cleaned_rows = self.cleaner.clean(csv_rows)
             cleaned_row_count = len(cleaned_rows)
+            
+            # Build CSV evidence ID map (checksum -> evidence_id from input CSV)
+            csv_evidence_id_map = self._build_csv_evidence_id_map(cleaned_rows)
             
             # Step 3: Fetch database records and build correlation
             db_records = self._fetch_db_records(job_id)
@@ -91,7 +96,7 @@ class ESLProcessor:
                 message=message
             )
             
-            return True, message
+            return True, message, csv_evidence_id_map
             
         except Exception as e:
             error_msg = f"ESL processing failed: {str(e)}"
@@ -109,7 +114,7 @@ class ESLProcessor:
         evidence_files = self.db_manager.get_evidence_files_by_job(job_id)
         return evidence_files
     
-    def _build_evidence_correlation(self, db_records: List[Dict]) -> Dict[str, Any]:
+    def _build_evidence_correlation(self, db_records: List[Dict]) -> Dict[str, EvidenceCorrelation]:
         """Build correlation map between database records and API data"""
         if not self.correlator:
             self.logger.log(
@@ -122,7 +127,7 @@ class ESLProcessor:
         
         return self.correlator.build_correlation_map(db_records)
     
-    def _validate_correlation(self, csv_rows: List[Any], correlation_map: Dict[str, Any]) -> None:
+    def _validate_correlation(self, csv_rows: List[InputCSVRow], correlation_map: Dict[str, EvidenceCorrelation]) -> None:
         """Validate that CSV rows can be correlated with database records via checksum"""
         missing_correlations = []
         
@@ -147,3 +152,15 @@ class ESLProcessor:
                 f"CSV has {cleaned_count} rows, "
                 f"Database has {db_count} records"
             )
+    
+    def _build_csv_evidence_id_map(self, cleaned_rows: List[InputCSVRow]) -> Dict[str, str]:
+        """Build a map of checksum -> evidence_id from input CSV rows
+        
+        Returns:
+            Dict mapping checksum (lowercase) -> evidence_id from input CSV
+        """
+        csv_evidence_id_map = {}
+        for csv_row in cleaned_rows:
+            checksum_lower = csv_row.checksum.lower()
+            csv_evidence_id_map[checksum_lower] = csv_row.evidence_id
+        return csv_evidence_id_map
