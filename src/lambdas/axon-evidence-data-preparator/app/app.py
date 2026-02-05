@@ -324,7 +324,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             bearer_token=ssm_parameters["bearer"],
             agency_id=agency_id
         )
-        success, message = processor.process(
+        success, message, csv_evidence_id_map = processor.process(
             input_csv_path,
             filepath,
             job_id
@@ -391,21 +391,40 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             last_modified_process="lambda: evidence data preparator"
         )    
         
-        # Update all evidence_files to mark as TRANSFER_READY
+        # Update all evidence_files to mark as TRANSFER_READY and populate evidence_id_source
         if job_updated:
             evidence_files = db_manager.get_evidence_files_by_job(job_id)
             for evidence_file in evidence_files:
                 evidence_id = evidence_file.get('evidence_id')
                 if evidence_id:
+                    # Get evidence_id from CSV if available
+                    checksum = evidence_file.get('checksum', '').lower()
+                    evidence_id_source = csv_evidence_id_map.get(checksum)
+                    
+                    if not evidence_id_source:
+                        logger.log(
+                            event=event,
+                            level=LogLevel.WARNING,
+                            status=LogStatus.WARNING,
+                            message="axon_evidence_data_preparator_missing_csv_evidence_id",
+                            context_data={
+                                "env_stage": env_stage,
+                                "evidence_id": evidence_id,
+                                "checksum": checksum,
+                            },
+                        )
+                    
                     db_manager.update_evidence_file_state(
                         evidence_id,
                         StatusCodes.TRANSFER_READY,
-                        "lambda: evidence data preparator"
+                        "lambda: evidence data preparator",
+                        evidence_id_source=evidence_id_source
                     )
 
         # Queue success message
         success_queue_url = ssm_parameters["transfer_prepare_queue_url"]
-        if queue_success_message(job_id, success_queue_url):
+        source_path = zip_result.get('zip_s3_uri')
+        if queue_success_message(job_id, success_queue_url, source_path=source_path):
             logger.log(
                 event=event,
                 level=LogLevel.INFO,
@@ -415,6 +434,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     "env_stage": env_stage,
                     "job_id": job_id,
                     "queue_url": success_queue_url,
+                    "source_path": source_path,
                 },
             )
         
@@ -450,15 +470,22 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     last_modified_process="lambda: evidence data preparator"
                 )
                 
-                # Update all evidence_files to FAILED state
+                # Update all evidence_files to FAILED state and populate evidence_id_source if available
                 evidence_files = db_manager.get_evidence_files_by_job(job_id)
                 for evidence_file in evidence_files:
                     evidence_id = evidence_file.get('evidence_id')
                     if evidence_id:
+                        # Get evidence_id from CSV if available (if we got far enough to build the map)
+                        evidence_id_source = None
+                        if 'csv_evidence_id_map' in locals():
+                            checksum = evidence_file.get('checksum', '').lower()
+                            evidence_id_source = csv_evidence_id_map.get(checksum)
+                        
                         db_manager.update_evidence_file_state(
                             evidence_id,
                             StatusCodes.FAILED,
-                            "lambda: evidence data preparator"
+                            "lambda: evidence data preparator",
+                            evidence_id_source=evidence_id_source
                         )
                         
             except Exception as db_error:
@@ -1216,7 +1243,8 @@ def parse_utc_to_date(utc_timestamp: str) -> str:
 def queue_message(
     job_id: str, 
     queue_url: str, 
-    is_error: bool = False
+    is_error: bool = False,
+    source_path: str | None = None,
 ) -> bool:
     """
     Queue the job_id for the next lambda to pick up or send message to exception queue.
@@ -1253,6 +1281,12 @@ def queue_message(
                     'DataType': 'String'
                 },
             }
+            if source_path:
+                message_body['source_path'] = source_path
+                message_attributes['source_path'] = {
+                    'StringValue': source_path,
+                    'DataType': 'String'
+                }
         
         # Prepare message for FIFO queue
         message_params = {
@@ -1278,9 +1312,9 @@ def queue_message(
 
 
 # Helper functions for clearer usage
-def queue_success_message(job_id: str, success_queue_url: str) -> bool:
+def queue_success_message(job_id: str, success_queue_url: str, source_path: str | None = None) -> bool:
     """Queue message for successful CSV generation."""
-    return queue_message(job_id, success_queue_url, is_error=False)
+    return queue_message(job_id, success_queue_url, is_error=False, source_path=source_path)
 
 
 def queue_error_message(job_id: str, error_queue_url: str) -> bool:

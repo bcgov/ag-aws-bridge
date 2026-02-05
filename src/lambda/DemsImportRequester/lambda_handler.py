@@ -134,7 +134,7 @@ class DemsImportRequester:
         job_id = get_attr('job_id') or get_attr('JobId') or get_attr('jobid')
         sourcePath = get_attr('sourcePath') or get_attr('SourcePath') or get_attr('source_path')
         dems_case_id = get_attr('dems_case_id') or get_attr('demscaseid') or get_attr('DemsCaseId')
-        destinationPath = get_attr('destinationPath') or get_attr('DestinationPath')
+        destinationPath = get_attr('destination_path') or get_attr('DestinationPath')
         first_attempt_time = get_attr('first_attempt_time') or get_attr('FirstAttemptTime')
         last_attempt_time = get_attr('last_attempt_time') or get_attr('LastAttemptTime')
         attempt_number = get_attr('attempt_number') or get_attr('AttemptNumber')
@@ -335,7 +335,7 @@ class DemsImportRequester:
                 'Job_id': {'DataType': 'String', 'StringValue': job_id},
                 'dems_case_id': {'DataType': 'String', 'StringValue': dems_case_id},
                 'dems_import_job_id' : {'DataType': 'String', 'StringValue': dems_import_job_id},
-                'sourcePath' : {'DataType': 'String', 'StringValue': sourcePath },
+                'source_path' : {'DataType': 'String', 'StringValue': sourcePath },
                 'first_attempt_time' : {'DataType': 'String', 'StringValue': first_attempt_time},
                 'last_attempt_time' : {'DataType' : 'String', 'StringValue' : last_attempt_time},
                 'attempt_number' : {'DataType' : 'String', 'StringValue' : str(attempt_number)}
@@ -508,16 +508,16 @@ def lambda_handler(event, context):
                 return attr.get('stringValue') or attr.get('binaryValue')
 
             job_id = get_value('job_id')
-            sourcePath = get_value('sourcePath')          # ← FIXED: no space!
+            sourcePath = get_value('source_path')          # ← FIXED: no space!
             dems_case_id = get_value('dems_case_id')
-            destinationPath = get_value('destinationPath') # ← also ensure no typo here
+            destinationPath = get_value('destination_path') # ← also ensure no typo here
 
             # Validate all required fields
             missing = []
             if not job_id:          missing.append('job_id')
-            if not sourcePath:      missing.append('sourcePath')
+            if not sourcePath:      missing.append('source_path')
             if not dems_case_id:    missing.append('dems_case_id')
-            if not destinationPath: missing.append('destinationPath')
+            if not destinationPath: missing.append('destination_path')
 
             if missing:
                 error_msg = f"Missing required message attributes: {', '.join(missing)}"
