@@ -52,7 +52,13 @@ CREATE TABLE evidence_files (
     dems_imported_id VARCHAR(255),
     last_modified_process VARCHAR(100),
     last_modified_utc TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    retry_count INTEGER DEFAULT 0
+    retry_count INTEGER DEFAULT 0,
+	bridge_s3_cleanup_scheduled_date TIMESTAMP,
+	bridge_s3_cleanup_scheduled BOOLEAN,
+	bridge_s3_cleanup_completed BOOLEAN,
+	bridge_s3_cleanup_completed_date TIMESTAMP,
+	axon_evidence_category_id INTEGER,
+	axon_evidence_category_change_date TIMESTAMP
 );
 
 -- =====================================================
