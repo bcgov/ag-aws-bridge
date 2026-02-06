@@ -42,6 +42,8 @@ class OutputCSVRow:
     evidence_id: str  # K (11)
     sharing_status: str  # L (12)
     checksum: str  # M (13)
+    evidence_id_staging: str = ""  # N (14)
+    evidence_file_id_staging: str = ""  # O (15)
 
 
 @dataclass
