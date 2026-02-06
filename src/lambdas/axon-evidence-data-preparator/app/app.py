@@ -928,7 +928,9 @@ def prepare_csv_data(
                     'DATE TO CROWN': date_to_crown,
                     'RELATIVE FILE PATH': file_name,
                     'DISCLOSED STATUS': '',
-                    'ORIGINAL FILE NUMBER': source_case_title
+                    'ORIGINAL FILE NUMBER': source_case_title,
+                    'EVIDENCE ID STAGING': evidence_id,
+                    'EVIDENCE FILE ID STAGING': evidence_file_id
                 }
             else:
                 csv_row = {
@@ -940,7 +942,9 @@ def prepare_csv_data(
                     'DATE TO CROWN': date_to_crown,
                     'RELATIVE FILE PATH': file_name,
                     'DISCLOSED STATUS': '',
-                    'ORIGINAL FILE NUMBER': source_case_title
+                    'ORIGINAL FILE NUMBER': source_case_title,
+                    'EVIDENCE ID STAGING': evidence_id,
+                    'EVIDENCE FILE ID STAGING': evidence_file_id
                 }
             
             csv_data.append(csv_row)

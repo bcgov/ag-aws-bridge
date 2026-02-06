@@ -10,7 +10,8 @@ class OutputCSVWriter:
     COLUMN_HEADERS = [
         'ID', 'TYPE', 'DESCRIPTION', 'TITLE', 'DATE', 'DATE TO CROWN',
         'RELATIVE FILE PATH', 'DISCLOSED STATUS', 'ORIGINAL FILE NUMBER',
-        'AGENCY FILE NAME', 'EVIDENCE ID', 'SHARING STATUS', 'CHECKSUM'
+        'AGENCY FILE NAME', 'EVIDENCE ID', 'SHARING STATUS', 'CHECKSUM',
+        'EVIDENCE ID STAGING', 'EVIDENCE FILE ID STAGING'
     ]
     
     def __init__(self, logger: Any, event: Dict[str, Any]):
@@ -39,6 +40,8 @@ class OutputCSVWriter:
                         'EVIDENCE ID': row.evidence_id,
                         'SHARING STATUS': row.sharing_status,
                         'CHECKSUM': row.checksum,
+                        'EVIDENCE ID STAGING': row.evidence_id_staging,
+                        'EVIDENCE FILE ID STAGING': row.evidence_file_id_staging,
                     })
             
             self.logger.log(

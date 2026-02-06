@@ -83,6 +83,8 @@ class DataMapper:
             evidence_id=csv_row.evidence_id,
             sharing_status=csv_row.sharing_status,
             checksum=csv_row.checksum,
+            evidence_id_staging=db_record.get("evidence_id", ""),
+            evidence_file_id_staging=db_record.get("evidence_file_id", ""),
         )
 
         return output_row
