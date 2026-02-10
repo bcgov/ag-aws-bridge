@@ -10,6 +10,7 @@ from psycopg2 import pool, sql
 from psycopg2.extras import RealDictCursor
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from botocore.config import Config
+import json
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -177,7 +178,6 @@ class DatabaseManager:
                     
                     created_files = []
                     skipped_files = []
-                    
                     # Create evidence files, handling duplicates gracefully
                     for file_data in files_data:
                         try:
