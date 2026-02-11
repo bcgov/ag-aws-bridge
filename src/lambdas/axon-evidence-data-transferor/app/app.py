@@ -968,8 +968,8 @@ def update_transfer_tracking_database(
             evidence_updates.append((
                 evidence_id,
                 StatusCodes.TRANSFERRED,
-                1,  # dems_is_transferred = true
-                utc_timestamp  # dems_transferred_utc
+                1,
+                utc_timestamp,
             ))
         
         # Step 5: Bulk update evidence files with atomic transaction
@@ -986,7 +986,7 @@ def update_transfer_tracking_database(
             },
         )
         
-        bulk_update_result = db_manager.bulk_update_evidence_file_states(
+        bulk_update_result = db_manager.bulk_update_evidence_file_states_with_transfer_info(
             evidence_updates=evidence_updates,
             last_modified_process='lambda: data transferor'
         )

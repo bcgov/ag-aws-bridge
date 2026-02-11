@@ -290,7 +290,6 @@ class DatabaseManager:
                             WHERE evidence_id = %s 
                             RETURNING *
                         """
-                        
                         cursor.execute(update_query, (new_state_code, last_modified_process, evidence_id))
                         if cursor.rowcount > 0:
                             updated_file = dict(cursor.fetchone())
@@ -312,6 +311,66 @@ class DatabaseManager:
                         'error': str(e),
                         'updated_files': [],
                         'updated_count': 0
+                    }
+
+    def bulk_update_evidence_file_states_with_transfer_info(
+        self,
+        evidence_updates: List[Tuple[str, int, int, str]],
+        last_modified_process: str,
+    ) -> Dict[str, Any]:
+        """
+        Atomically update multiple evidence file states with transfer timestamp and attempt number.
+        evidence_updates: List of (evidence_id, new_state_code, attempt_number, dems_transferred_utc) tuples
+        """
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                try:
+                    cursor.execute("BEGIN")
+
+                    updated_files = []
+
+                    for evidence_id, new_state_code, attempt_number, dems_transferred_utc in evidence_updates:
+                        update_query = """
+                            UPDATE evidence_files
+                            SET evidence_transfer_state_code = %s,
+                                dems_is_transferred = true,
+                                attempt_number = %s,
+                                dems_transferred_utc = %s,
+                                last_modified_process = %s,
+                                last_modified_utc = NOW()
+                            WHERE evidence_id = %s
+                            RETURNING *
+                        """
+                        cursor.execute(
+                            update_query,
+                            (
+                                new_state_code,
+                                attempt_number,
+                                dems_transferred_utc,
+                                last_modified_process,
+                                evidence_id,
+                            ),
+                        )
+                        if cursor.rowcount > 0:
+                            updated_file = dict(cursor.fetchone())
+                            updated_files.append(updated_file)
+
+                    cursor.execute("COMMIT")
+
+                    return {
+                        "success": True,
+                        "updated_files": updated_files,
+                        "updated_count": len(updated_files),
+                    }
+
+                except Exception as e:
+                    cursor.execute("ROLLBACK")
+                    logger.error(f"Bulk evidence file state update with transfer info failed: {e}")
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "updated_files": [],
+                        "updated_count": 0,
                     }
 
     def create_evidence_transfer_job(self, job_data: Dict[str, Any]) -> Dict:
