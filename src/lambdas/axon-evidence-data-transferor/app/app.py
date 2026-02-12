@@ -968,7 +968,6 @@ def update_transfer_tracking_database(
             evidence_updates.append((
                 evidence_id,
                 StatusCodes.TRANSFERRED,
-                1,
                 utc_timestamp,
             ))
         

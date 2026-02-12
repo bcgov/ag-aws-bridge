@@ -315,12 +315,13 @@ class DatabaseManager:
 
     def bulk_update_evidence_file_states_with_transfer_info(
         self,
-        evidence_updates: List[Tuple[str, int, int, str]],
+        evidence_updates: List[Tuple[str, int, str]],
         last_modified_process: str,
     ) -> Dict[str, Any]:
         """
-        Atomically update multiple evidence file states with transfer timestamp and attempt number.
-        evidence_updates: List of (evidence_id, new_state_code, attempt_number, dems_transferred_utc) tuples
+        Atomically update multiple evidence file states with transfer timestamp.
+        evidence_updates: List of (evidence_id, new_state_code, dems_transferred_utc) tuples
+        Updates: dems_is_transferred=true, dems_transferred_utc
         """
         with self.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -329,12 +330,11 @@ class DatabaseManager:
 
                     updated_files = []
 
-                    for evidence_id, new_state_code, attempt_number, dems_transferred_utc in evidence_updates:
+                    for evidence_id, new_state_code, dems_transferred_utc in evidence_updates:
                         update_query = """
                             UPDATE evidence_files
                             SET evidence_transfer_state_code = %s,
                                 dems_is_transferred = true,
-                                attempt_number = %s,
                                 dems_transferred_utc = %s,
                                 last_modified_process = %s,
                                 last_modified_utc = NOW()
@@ -345,7 +345,6 @@ class DatabaseManager:
                             update_query,
                             (
                                 new_state_code,
-                                attempt_number,
                                 dems_transferred_utc,
                                 last_modified_process,
                                 evidence_id,
