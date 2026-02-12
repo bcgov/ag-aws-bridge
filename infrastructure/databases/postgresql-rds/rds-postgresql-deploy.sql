@@ -58,7 +58,8 @@ CREATE TABLE evidence_files (
 	bridge_s3_cleanup_completed BOOLEAN,
 	bridge_s3_cleanup_completed_date TIMESTAMP,
 	axon_evidence_category_id INTEGER,
-	axon_evidence_category_change_date TIMESTAMP
+	axon_evidence_category_change_date TIMESTAMP.
+	evidence_file_name VARCHAR(255)
 );
 
 -- =====================================================
