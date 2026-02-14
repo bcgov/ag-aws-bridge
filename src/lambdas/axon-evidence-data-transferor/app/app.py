@@ -961,9 +961,15 @@ def update_transfer_tracking_database(
         
         # Step 4: Prepare bulk update list
         evidence_updates = []
+        utc_timestamp = datetime.utcnow().isoformat() + 'Z'
+        
         for evidence_file in evidence_files:
             evidence_id = evidence_file.get('evidence_id')
-            evidence_updates.append((evidence_id, StatusCodes.TRANSFERRED))
+            evidence_updates.append((
+                evidence_id,
+                StatusCodes.TRANSFERRED,
+                utc_timestamp,
+            ))
         
         # Step 5: Bulk update evidence files with atomic transaction
         logger.log(
@@ -975,10 +981,11 @@ def update_transfer_tracking_database(
                 "env_stage": env_stage,
                 "job_id": job_id,
                 "file_count": len(evidence_updates),
+                "dems_transferred_utc": utc_timestamp,
             },
         )
         
-        bulk_update_result = db_manager.bulk_update_evidence_file_states(
+        bulk_update_result = db_manager.bulk_update_evidence_file_states_with_transfer_info(
             evidence_updates=evidence_updates,
             last_modified_process='lambda: data transferor'
         )
@@ -1355,6 +1362,9 @@ def queue_success_message(
     
     if dems_case_id is not None:
         message_data['dems_case_id'] = dems_case_id
+    
+    # Add attempt number
+    message_data['attempt_number'] = 1
     
     # Add any additional data elements
     message_data.update(additional_data)
