@@ -58,7 +58,8 @@ def get_lambda_config(ssm=None,context_data=None) -> Dict[str, str]:
             'axon_get_evidence_details_url': f'/{env_stage}/axon/api/get_evidence_details_url',
             'normal_download_queue_url': f'/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download',
             'oversize_download_queue_url': f'/{env_stage}/bridge/sqs-queues/url_q-axon-evidence-download-oversize',
-            'transfer_exception_queue_url': f'/{env_stage}/bridge/sqs-queues/url_q-transfer-exception'
+            'transfer_exception_queue_url': f'/{env_stage}/bridge/sqs-queues/url_q-transfer-exception',
+            'get_list_case_evidence_url' : f'/{env_stage}/axon/api/get_list_case_evidence_url'
         }
         
         parameter_names = list(parameter_paths.values())
@@ -322,8 +323,11 @@ def get_case_evidence_from_api(source_case_id: str, job_id: str, config: Dict[st
             'Authorization': f'Bearer {config["axon_bearer_token"]}',
             'Content-Type': 'application/json'
         }
-        api_url = f"{config['axon_base_url']}api/v2/agencies/{config['axon_agency_id']}/cases/{source_case_id}/relationships/evidence"
-        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {requests.api.__path__} for case {source_case_id}")
+        #api_url = f"{config['axon_base_url']}api/v2/agencies/{config['axon_agency_id']}/cases/{source_case_id}/relationships/evidence"
+        api_url = f"{config['get_list_case_evidence_url']}"
+        api_url = api_url.replace('GUID$$$$',source_case_id)
+        
+        logger.log_success(event=Constants.PROCESS_NAME, message=f"Calling Axon API: {api_url} for case {source_case_id}")
 
         start_time = time.perf_counter()
         response = requests.get(api_url, headers=headers, timeout=30)
@@ -630,9 +634,13 @@ def process_evidence_records(
             for file_entry in files_data:
                  # Extract file attributes
                 file_attributes = file_entry.get("attributes", {})
+                if not isinstance(file_attributes, list):
+                    logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Files attributes is not a list for evidence_id {evidence_id}: {file_attributes}"))
+                    continue
                 # Validate required file fields
                 file_id = file_entry.get('id')
                 file_size = file_attributes.get('size', 0)
+                file_name = file_attributes.get('fileName', None)
                 if not file_id or not isinstance(file_size, (int, float)):
                     logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Missing or invalid file id/size for evidence_id {evidence_id}: {file_entry}"))
                     continue
@@ -646,7 +654,13 @@ def process_evidence_records(
                     'source_case_id': source_case_id,
                     'file_size_bytes': file_size,
                     'checksum': file_attributes.get('checksum'),
-                    'last_modified_process': Constants.PROCESS_NAME
+                    'last_modified_process': Constants.PROCESS_NAME,
+                    'bridge_s3_cleanup_scheduled_date' : '',
+                    'bridge_s3_cleanup_scheduled' : False,
+                    'bridge_s3_cleanup_completed' : False,
+                    'bridge_s3_cleanup_completed_date' : '',
+                    'axon_evidence_category_id' : 0,
+                    'evidence_file_name' : file_name
                     }
                 files_to_create.append(file_data)
             

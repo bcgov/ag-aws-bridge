@@ -187,12 +187,13 @@ class DatabaseManager:
                                     evidence_file_type, source_case_id, file_size_bytes, checksum,
                                     axon_is_downloaded, dems_is_transferred, dems_is_imported,
                                     last_modified_process, last_modified_utc, retry_count,evidence_id_source,bridge_s3_cleanup_scheduled_date, 
-                                    bridge_s3_cleanup_scheduled,bridge_s3_cleanup_completed,bridge_s3_cleanup_completed_date,axon_evidence_category_id
+                                    bridge_s3_cleanup_scheduled,bridge_s3_cleanup_completed,bridge_s3_cleanup_completed_date,axon_evidence_category_id,evidence_file_name
                                 ) VALUES (
                                     %(evidence_id)s, %(job_id)s, %(evidence_transfer_state_code)s, %(evidence_file_id)s,
                                     %(evidence_file_type)s, %(source_case_id)s, %(file_size_bytes)s, %(checksum)s,
                                     false, false, false, %(last_modified_process)s, NOW(), %(retry_count)s,%(evidence_id_source)s, %(bridge_s3_cleanup_scheduled_date)s, 
-                                    %(bridge_s3_cleanup_scheduled)s,%(bridge_s3_cleanup_completed)s,%(bridge_s3_cleanup_completed_date)s,%(axon_evidence_category_id)s
+                                    %(bridge_s3_cleanup_scheduled)s,%(bridge_s3_cleanup_completed)s,%(bridge_s3_cleanup_completed_date)s,%(axon_evidence_category_id)s,
+                                    %(evidence_file_name)s
                                 ) RETURNING *
                             """
                             
