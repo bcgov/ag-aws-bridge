@@ -322,7 +322,7 @@ class DatabaseManager:
             job_id, job_created_utc, job_status_code, job_msg, source_system, source_agency,
             source_case_id, source_case_title, source_case_last_modified_utc,
             source_case_evidence_count_total, source_case_evidence_count_to_download,
-            source_case_evidence_count_downloaded, dems_case_id,  last_modified_process,
+            source_case_evidence_count_downloaded, dems_case_id, agency_id_code,agency_file_number,  last_modified_process,
             last_modified_utc, retry_count, max_retries
         ) VALUES (
             %(job_id)s, NOW(), %(job_status_code)s, %(job_msg)s, %(source_system)s, %(source_agency)s,
