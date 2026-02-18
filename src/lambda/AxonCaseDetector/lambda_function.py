@@ -5,6 +5,7 @@ import urllib3
 import urllib.parse
 import os 
 import time
+import uuid
 
 from lambda_structured_logger import LambdaStructuredLogger, LogLevel, LogStatus
 from datetime import datetime, timezone
@@ -62,7 +63,8 @@ def lambda_handler(event, context):
             f'/{env_stage}/axon/api/client_id',
             f'/{env_stage}/axon/api/agency_id',
             f'/{env_stage}/axon/api/case_detector_interval_mins',
-            f'/{env_stage}/bridge/sqs-queues/url_q-axon-case-found'
+            f'/{env_stage}/bridge/sqs-queues/url_q-axon-case-found',
+            f'/{env_stage}/axon/api/get_cases_url_filter_path'
         ]
         
         # Retrieve multiple parameters at once
@@ -130,6 +132,7 @@ def lambda_handler(event, context):
         }
         # Make the GET request to the API endpoint
         api_url = parameters[f'/{env_stage}/axon/api/base_url'] + 'api/v2/agencies/' +  parameters[f'/{env_stage}/axon/api/agency_id'] + '/cases'
+        #api_url = parameters[f'/{env_stage}/axon/api/get_cases_url_filter_path']
         logger.log(event="created api url ", status=LogStatus.IN_PROGRESS, message="API URL constructed : " + api_url)
 
         # Get current UTC time
@@ -146,19 +149,22 @@ def lambda_handler(event, context):
         fivemins_past_str = fivemins_past.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
         
         # make filter string
-        filter_string = f"createdOn in {fivemins_past_str} to {current_utc_time_str}"
+        filter_string = parameters[f'/{env_stage}/axon/api/get_cases_url_filter_path'] + " " +  fivemins_past_str + " to "  + current_utc_time_str
 
         transferJobStatus = ""
         
         db_health_Check = db_manager.health_check()
         logger.log(event="checkpoint", status=LogStatus.IN_PROGRESS, message="After [db manager healthcheck, db healthy : " + str(db_health_Check["healthy"]))
         try:
-            params = {
-                "filter": filter_string
-            }
+            # params = {
+             #   "filter": filter_string
+            #}
             logger.log(event="filter string ", status=LogStatus.IN_PROGRESS, message="filter string : " + filter_string)
             start = time.perf_counter()
-            response = http.request('GET', api_url, fields=params,headers = headers, timeout=urllib3.Timeout(connect=5, read=10))
+            if filter_string:
+                api_url = api_url +  filter_string
+                
+            response = http.request('GET', api_url, headers = headers, timeout=urllib3.Timeout(connect=5, read=10))
            
             if response.status >= 400: raise Exception(f"HTTP error: {response.status}")
 
@@ -205,6 +211,10 @@ def lambda_handler(event, context):
                 if transferJobStatus:
                     statusIdentifier = str(transferJobStatus["identifier"])
                 
+                orig_job_id = context.aws_request_id
+                # Parse it into a UUID object
+                uuid_obj = uuid.UUID(orig_job_id)
+                
                 if count >= 1:
                     data = json_data.get("data", [])
                      # Get response time
@@ -212,13 +222,21 @@ def lambda_handler(event, context):
             
                     logger.log_api_call(event="call to Axon Get Cases successful. Found at least 1 case", url=api_url, method="GET", status_code= response.status, 
                     response_time = response_time,   job_id=context.aws_request_id)
-
+                    job_counter = 0
+                    
                     for item in data:
                         # Extract fields from each item
                         item_type = item.get("type")
                         item_id = item.get("id")
                         attributes = item.get("attributes", {})
+                        
+                        # Convert to integer, increment by 1
+                        int_value = uuid_obj.int
+                        new_int = int_value + job_counter
 
+                        # Create a new UUID from the incremented integer
+                        new_job_id = uuid.UUID(int=new_int)
+                        job_counter = job_counter +1
                         # Extract attributes
                         title = attributes.get("title")
                         description = attributes.get("description")
@@ -231,16 +249,16 @@ def lambda_handler(event, context):
                         # Extract caseSharedFrom (list)
                         case_shared_from = attributes.get("caseSharedFrom", [])
 
-                      
-
-                        queryParams = {"job_id" : context.aws_request_id, "job_created_utc" : current_utc_time, 
+  
+                        queryParams = {"job_id" : str(new_job_id), "job_created_utc" : current_utc_time, 
                         "source_agency" : case_shared_from, "source_case_id" : item_id, "job_status_code" : statusIdentifier,
+                        "job_msg" : "create new transfer job",
                         "source_system" : "Axon", "source_case_evidence_count_total" : count,
                          "source_case_title" : title, "last_modified_process": "lambda: axon case detector", "source_case_last_modified_utc" : sourceCaseLastModified ,
                           "last_modified_utc" : current_utc_time}
                         
                         db_manager.create_evidence_transfer_job(job_data=queryParams)
-                        logger.log_database_update_jobs(job_id=context.aws_request_id,status=response.status, rows_affected=count, response_time_ms=response_time)
+                        logger.log_database_update_jobs(job_id=str(new_job_id),status=response.status, rows_affected=count, response_time_ms=response_time)
 
                         # Send SQS Message            
                         try:
@@ -252,11 +270,11 @@ def lambda_handler(event, context):
                                 DelaySeconds=0,  # Deliver after 5 seconds
                                 MessageGroupId="AXON-" + item_id,
                                 MessageAttributes={
-                                    'Job_id': {
+                                    'job_id': {
                                         'DataType': 'String',
-                                        'StringValue': context.aws_request_id
+                                        'StringValue': str(new_job_id)
                                     },
-                                    'Source_case_title': {
+                                    'source_case_title': {
                                         'DataType': 'String',
                                         'StringValue': title
                                     },
