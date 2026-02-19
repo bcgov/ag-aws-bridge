@@ -278,8 +278,8 @@ class DemsCaseValidator:
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
             if not message_attributes:
                 message_attributes = {
-                    'Job_id': {'DataType': 'String', 'StringValue': job_id},
-                    'Source_case_id': {'DataType': 'String', 'StringValue': case_id}
+                    'job_id': {'DataType': 'String', 'StringValue': job_id},
+                    'source_case_id': {'DataType': 'String', 'StringValue': case_id}
                 }
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
@@ -289,7 +289,7 @@ class DemsCaseValidator:
                 }
             # Add case_title to message attributes if case_title is not None
             if case_title is not None and message_attributes is not None:
-                message_attributes['Case_title'] = {
+                message_attributes['case_title'] = {
                     'DataType': 'String',
                     'StringValue': case_title[:256],  # Ensure case_title adheres to SQS 256-byte limit
                 }
