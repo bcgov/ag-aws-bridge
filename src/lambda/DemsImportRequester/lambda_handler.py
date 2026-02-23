@@ -158,7 +158,7 @@ class DemsImportRequester:
         #job_id, sourcePath, dems_case_id,destinationPath, first_attempt_time, last_attempt_time, attempt_number
         return job_id, sourcePath, dems_case_id, destinationPath, first_attempt_time, last_attempt_time,attempt_number_int
 
-    def callEDTDemsApi( self, destinationPath:str, first_attempt_time:str, last_attempt_time:str, attempt_number:int,job_id, dems_case_id, imagePath)->str:
+    def callEDTDemsApi( self, destinationPath:str, first_attempt_time:str, last_attempt_time:str, attempt_number:int,job_id, dems_case_id, imagePath, message_handle)->str:
         import_id = None
         max_attempt_count = int(self.parameters[f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries'])
         try:
@@ -209,15 +209,24 @@ class DemsImportRequester:
                     queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status']
                     current_timestamp = datetime.now()
                     attempt_number = attempt_number +1
+                    
+                    self.sqs_client.delete_message(
+                    QueueUrl=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'],
+                    ReceiptHandle=message_handle
+                    )
+                    self.logger.info(f"Deleted message: {message_handle}")
+
                     self.send_sqs_message(queue_url, job_id, first_attempt_time, last_attempt_time,attempt_number,dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath="",
                                            current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                    
                     self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
                    
                 elif max_attempt_count == attempt_number:
                     queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception']
                     current_timestamp = datetime.now()
                     job_msg = "dems import request failed; maximum attempts"
-                    self.process_exception_message(job_id, job_msg)
+
+                    self.process_exception_message(job_id, message_handle,job_msg,source_queue_url=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'])
                     self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Import attempt max count exceeded."))
                     return None
             
@@ -418,7 +427,7 @@ class DemsImportRequester:
             import_id: Optional[str] = None
             
             try:
-                import_id = self.callEDTDemsApi(destinationPath, first_attempt_time, last_attempt_time, attempt_number,job_id, dems_case_id=dems_case_id, imagePath=sourcePath )
+                import_id = self.callEDTDemsApi(destinationPath, first_attempt_time, last_attempt_time, attempt_number,job_id, dems_case_id=dems_case_id, imagePath=sourcePath,message_handle=receipt_handle )
             except Exception as mImportIdEx:
                  self.logger.log(
                     event="EDT Dems Import Requester",
