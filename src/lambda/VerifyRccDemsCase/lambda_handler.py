@@ -20,7 +20,9 @@ class Constants:
     ERROR = "ERROR",
     PROCESS_NAME = "axonRccAndDemsCaseValidator"
     HTTP_OK = 200
-    HTTP_BAD_REQUEST = 400
+    HTTP_BAD_REQUEST = 400,
+    EARLY_NOTIFICATION_ATTEMPT_COUNT = 1
+
 
 
 
@@ -325,6 +327,32 @@ class DemsCaseValidator:
         except Exception as e:
             self.logger.log_error(event="SQS Message Send Failed", error=e, job_id=self.job_id)
 
+    def create_early_no_case_found_sqs_message(job_id:str, source_case_title:str,JobStatusCodeId : str )->dict:
+
+     return {
+        'Id': job_id,  # Must be unique within the batch
+        'MessageBody': json.dumps({
+            'job_id': job_id,
+            'source_case_title ': source_case_title,
+            "JobStatusCodeId" : JobStatusCodeId
+        }),
+        'MessageGroupId': f"job-{job_id}",  # Required for FIFO queues
+        'MessageDeduplicationId': f"{job_id}-{JobStatusCodeId}",  # Required for FIFO queues
+        'MessageAttributes': {
+                'job_id': {
+                'StringValue': job_id,
+                'DataType': 'String'
+            },
+            'source_case_title': {  # Added evidence_id as message attribute
+                'StringValue': source_case_title,
+                'DataType': 'String'
+            },
+              'JobStatusCodeId': {  # Added evidence_id as message attribute
+                'StringValue': JobStatusCodeId,
+                'DataType': 'String'
+            }
+        }
+    }
     def process_message(self, message: dict):
         """Process a single SQS message."""
         try:
@@ -407,7 +435,12 @@ class DemsCaseValidator:
                     job_id=job_id,
                     custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
                 )
-                self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
+                if attenmpt_number == Constants.EARLY_NOTIFICATION_ATTEMPT_COUNT:
+                    sqs_msg_attributes= self.create_early_no_case_found_sqs_message(job_id,source_case_title=case_title,JobStatusCodeId=cadJurId)
+                    self.send_sqs_message('q-transfer-exception-early-notify.fifo', job_id, case_title, current_timestamp,  case_title, message_attributes=sqs_msg_attributes)
+
+                else:
+                    self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
                 
         except Exception as msg_err:
             self.logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=self.job_id)
