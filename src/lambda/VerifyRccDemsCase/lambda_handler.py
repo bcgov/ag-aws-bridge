@@ -63,7 +63,9 @@ class DemsCaseValidator:
             f'/{self.env_stage}/isl_endpoint_secret',
             f'/{self.env_stage}/isl_endpoint/case_id_method',
             f'/{self.env_stage}/axon/api/client_id',
-            f'/{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries'
+            f'/{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries',
+            f'/{self.env_stage}/edt/valid-case-id-threshold'
+
         ]
         
         try:
@@ -388,6 +390,7 @@ class DemsCaseValidator:
             
             dems_api_url = self.parameters[f'/{self.env_stage}/isl_endpoint_url'] + self.parameters[f'/{self.env_stage}/isl_endpoint/case_id_method']
             bearer_token = self.parameters[f'/{self.env_stage}/isl_endpoint_secret']
+            dems_case_id_threshold = int(self.parameters[f'{self.env_stage}/edt/valid-case-id-threshold'])
             agency_codes_to_try = [agency_id_code] + (sub_agencies if sub_agency_yn == 'Y' else [])
             found_dems_case = False
 
@@ -395,10 +398,16 @@ class DemsCaseValidator:
                 status, dems_case_id = self.call_dems_api(dems_api_url, bearer_token, code, agency_file_number)
                 
                 if status == Constants.HTTP_OK and dems_case_id:
-                    self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
-                    self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
-                    found_dems_case = True
-                    break
+                    int_dems_case_id = int(dems_case_id)
+                    if int_dems_case_id > dems_case_id_threshold:
+
+                        self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
+                        self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
+                        found_dems_case = True
+                        break
+                    elif int_dems_case_id <= dems_case_id_threshold:
+                        self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['receiptHandle'], case_title)
+                        
                 elif status >= Constants.HTTP_BAD_REQUEST:
                     self.logger.log_error(event="DEMS API Error", error=f"HTTP error: {status}", job_id=job_id)
             

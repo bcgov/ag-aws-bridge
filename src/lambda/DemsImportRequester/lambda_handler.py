@@ -217,7 +217,7 @@ class DemsImportRequester:
                     self.logger.info(f"Deleted message: {message_handle}")
 
                     self.send_sqs_message(queue_url, job_id, first_attempt_time, last_attempt_time,attempt_number,dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath="",
-                                           current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                                           current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"), importName=importName)
                     
                     self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
                    
@@ -328,7 +328,7 @@ class DemsImportRequester:
                         self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
 
     def send_sqs_message(self, queue_url: str, job_id: str, dems_case_id: str, dems_import_job_id:str,
-                         current_timestamp: str,sourcePath:str,first_attempt_time:str, last_attempt_time:str,attempt_number:int, custom_exception: Exception = None):
+                         current_timestamp: str,sourcePath:str,first_attempt_time:str, last_attempt_time:str,attempt_number:int, custom_exception: Exception = None, importName:str=None):
         """Send message to SQS queue."""
         # Define the alphanumeric character pool
         alphanumeric_chars = string.ascii_letters + string.digits
@@ -339,8 +339,8 @@ class DemsImportRequester:
         try:
            
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
-            
-            message_attributes = {
+            if importName is None:
+                message_attributes = {
                 'Job_id': {'DataType': 'String', 'StringValue': job_id},
                 'dems_case_id': {'DataType': 'String', 'StringValue': dems_case_id},
                 'dems_import_job_id' : {'DataType': 'String', 'StringValue': dems_import_job_id},
@@ -348,7 +348,14 @@ class DemsImportRequester:
                 'first_attempt_time' : {'DataType': 'String', 'StringValue': first_attempt_time},
                 'last_attempt_time' : {'DataType' : 'String', 'StringValue' : last_attempt_time},
                 'attempt_number' : {'DataType' : 'String', 'StringValue' : str(attempt_number)}
-            }
+                }
+            elif importName :
+                 message_attributes = {
+                'Job_id': {'DataType': 'String', 'StringValue': job_id},
+                'attempt_number' : {'DataType' : 'String', 'StringValue' : str(attempt_number)},
+                'import-name' : {'DataType' : 'String', 'StringValue' : importName}
+                }
+                
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
                 message_attributes['ExceptionMessage'] = {
