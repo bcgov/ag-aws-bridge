@@ -67,7 +67,7 @@ class DemsImportRequester:
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import',
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status',
             f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries',
-            f'/{self.env_stage}/bridge/sqs-queues/q-transfer-exception-early-notify.fifo'
+            f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify'
         ]
         
         try:
@@ -431,7 +431,7 @@ class DemsImportRequester:
             random_string = ''.join(random.choices(alphanumeric_chars, k=20))
             try:
                 # send sqs to transfer exception early notify
-                queue_url = self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/q-transfer-exception-early-notify.fifo']
+                queue_url = self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify']
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
                
                 response = self.sqs_client.send_message(
