@@ -25,6 +25,7 @@ class Constants:
     HTTP_OK_CODE = 200,
     HTTP_ERROR_CODE = 400,
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
+    FIRST_ATTEMPT_COUNT = 1
 
 class DemsImportRequester:
     """Main class to call the EDT create-load-file-import API to initiate "import" of evidence within EDT's S3 bucket to the particular, relevant target DEMS case"""
@@ -65,7 +66,8 @@ class DemsImportRequester:
             f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception',
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import',
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status',
-            f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries'
+            f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries',
+            f'/{self.env_stage}/bridge/sqs-queues/q-transfer-exception-early-notify.fifo'
         ]
         
         try:
@@ -229,6 +231,32 @@ class DemsImportRequester:
                     self.process_exception_message(job_id, message_handle,job_msg,source_queue_url=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'])
                     self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Import attempt max count exceeded."))
                     return None
+                elif attempt_number == Constants.FIRST_ATTEMPT_COUNT:
+                    job_msg = 'initial dems import failed. retrying'
+                    evidence_file = self.db_manager.get_evidence_transfer_job(job_id)
+                    source_case_title = ""
+                    if evidence_file:
+                        source_case_title = evidence_file['source_case_title']
+                        
+                    self.update_job_status(job_id=job_id,job_msg="initial dems import failed. retrying")
+                   
+                    sqs_msg_attributes_early_notif = {
+                        'job_id': {'DataType': 'String', 'StringValue': job_id},
+                        'source_case_title' : {'DataType': 'String', 'StringValue': source_case_title},
+                        'JobStatusCodeId ' : {'DataType': 'String', 'StringValue': '83.5'},
+
+                    }
+
+                    sqs_msg_attributes_case_found = {
+                      
+                        'job_id': {'DataType': 'String', 'StringValue': job_id},
+                        'source_case_title' : {'DataType': 'String', 'StringValue': source_case_title},
+                         'attempt_number ' : {'DataType': 'String', 'StringValue': '2'},
+                         'first_attempt_time' : {'DataType': 'String', 'StringValue': current_timestamp.strftime("%Y-%m-%d %H:%M:%S")},
+                          'last_attempt_time' : {'DataType': 'String', 'StringValue': current_timestamp.strftime("%Y-%m-%d %H:%M:%S")},
+
+                    }
+                    self.send_early_attempt_sqs_message(job_id, message_handle=message_handle,early_notif_message_attributes=sqs_msg_attributes_early_notif, case_found_msg_attrs=sqs_msg_attributes_case_found)
             
             if not json_data:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
@@ -239,7 +267,7 @@ class DemsImportRequester:
             error_msg = f"EDTDEMS API lookup failed for job_id: {job_id} or importname: {importName}. Error: {str(e)}"
             self.logger.log_error(event="EDTDEMS API lookup Failed", error=error_msg, job_id=self.job_id)
             raise
-
+   
     def process_exception_message(self, job_id:str, message_handle:str, source_case_title:str, job_msg:str, source_queue_url:str )->bool:
         status_code = "IMPORT_FAILED"
 
@@ -394,6 +422,72 @@ class DemsImportRequester:
         except Exception as e:
             self.logger.log_error(event="SQS Message Send Failed", error=str(e), job_id=self.job_id)
 
+    def send_early_attempt_sqs_message(self,  job_id: str, message_handle, early_notif_message_attributes:dict, case_found_msg_attrs:dict):
+            """Send message to SQS queue."""
+            # Define the alphanumeric character pool
+            alphanumeric_chars = string.ascii_letters + string.digits
+
+            # Generate a random string of 20 characters
+            random_string = ''.join(random.choices(alphanumeric_chars, k=20))
+            try:
+                # send sqs to transfer exception early notify
+                queue_url = self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/q-transfer-exception-early-notify.fifo']
+                current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+               
+                response = self.sqs_client.send_message(
+                QueueUrl=queue_url,
+                MessageBody='Sending SQS message to ' + queue_url,
+                DelaySeconds=0,
+                MessageGroupId="dems-import-requested",
+                MessageDeduplicationId=random_string,
+                MessageAttributes=early_notif_message_attributes
+                )
+                self.logger.log_sqs_message_sent(
+                queue_url=queue_url,
+                message_id=response,
+                response_time_ms=1,
+                message_body={
+                    "timestamp": current_timestamp,
+                    "level": "INFO",
+                    "function": Constants.PROCESS_NAME,
+                    "event": "SQSMessageQueued",
+                    "message": "Queued message for DEMS Import EDT Requester",
+                    "job_id": job_id,
+                    "dems_import_job_id": '',
+                    "additional_info": {
+                        "target_queue": queue_url,
+                        "message_group_id": job_id,
+                        "deduplication_id": "file-" + random_string
+                    }
+                }
+                )
+            except Exception as e:
+                self.logger.log_error(event="SQS Message Send Failed", error=str(e), job_id=self.job_id)
+           
+            try:
+                #send sqs to q-case-found
+                random_string = ''.join(random.choices(alphanumeric_chars, k=20))
+                # send sqs to transfer exception early notify
+                queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
+               
+                response = self.sqs_client.send_message(
+                QueueUrl=queue_url,
+                MessageBody='Sending SQS message to ' + queue_url,
+                DelaySeconds=0,
+                MessageGroupId="dems-import-requested",
+                MessageDeduplicationId=random_string,
+                MessageAttributes=case_found_msg_attrs
+                )
+                #delete old message
+                self.sqs_client.delete_message(
+                    QueueUrl=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'],
+                    ReceiptHandle=message_handle
+                    )
+                self.logger.info(f"Deleted message: {message_handle}")
+            except Exception as send_case_found_ex:
+                self.logger.log_error(event="SQS Message Send Failed", error=str(send_case_found_ex), job_id=self.job_id)
+
+        
     def process_message(self, message: dict):
         """Process a single SQS message."""
         try:
