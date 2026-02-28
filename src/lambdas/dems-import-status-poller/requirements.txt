@@ -1,0 +1,14 @@
+# Lambda dependencies for DEMS Import Status Poller
+
+# AWS SDK
+boto3>=1.26.0
+
+# HTTP client
+urllib3>=1.26.0
+
+# JSON processing
+# (built-in, no need to add)
+
+# Layer dependencies (these are provided by lambda layers)
+# lambda-structured-logger
+# bridge-tracking-db-layer

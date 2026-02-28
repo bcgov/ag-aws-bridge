@@ -624,6 +624,24 @@ class DatabaseManager:
         query = "SELECT * FROM evidence_files WHERE job_id = %s ORDER BY evidence_id"
         return self.execute_query(query, (job_id,))
     
+    def get_evidence_files_transferred_count(self, job_id: str) -> int:
+        """
+        Get count of evidence files where dems_is_transferred = true for a specific job.
+        
+        Args:
+            job_id: The job ID to count transferred files for
+            
+        Returns:
+            Count of files with dems_is_transferred = true
+        """
+        query = """
+            SELECT COUNT(*) as count 
+            FROM evidence_files 
+            WHERE job_id = %s AND dems_is_transferred = true
+        """
+        result = self.execute_query_one(query, (job_id,))
+        return result['count'] if result else 0
+    
     def get_evidence_files_by_state(self, state_code: int, limit: int = 100) -> List[Dict]:
         """Get evidence files by state code."""
         query = """
