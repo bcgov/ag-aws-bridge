@@ -39,7 +39,8 @@ def get_ssm_parameters(
         "connection_string": f"/{env_stage}/bridge/tracking-db/connection-string",
         "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
         "transfer_completion_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-transfer-completion",
-        "import_status_retries_queue_url": f"/{env_stage}/bridge/sqs-queues/lambda-dems-import-status-retries",
+        "import_status_retries_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-dems-import-status",
+        "max_retries": f"/{env_stage}/bridge/sqs-queues/lambda-dems-import-status-retries",
     }
 
     parameters = {}
@@ -303,6 +304,7 @@ def evaluate_and_handle_import_status(
     dems_case_id: str,
     dems_import_job_id: str,
     source_path: str,
+    import_name: str,
     attempt_number: int,
     max_retries: int,
     ssm_parameters: Dict[str, str],
@@ -320,6 +322,7 @@ def evaluate_and_handle_import_status(
         dems_case_id: DEMS case ID
         dems_import_job_id: DEMS import job ID
         source_path: Source path of the import
+        import_name: Import name from the original message
         attempt_number: Current retry attempt number
         max_retries: Maximum number of retries allowed
         ssm_parameters: SSM parameters dict
@@ -473,6 +476,7 @@ def evaluate_and_handle_import_status(
                 dems_case_id=dems_case_id,
                 dems_import_job_id=dems_import_job_id,
                 source_path=source_path,
+                import_name=import_name,
                 attempt_number=attempt_number,
                 ssm_parameters=ssm_parameters,
                 logger=logger,
@@ -528,6 +532,7 @@ def evaluate_and_handle_import_status(
                 dems_case_id=dems_case_id,
                 dems_import_job_id=dems_import_job_id,
                 source_path=source_path,
+                import_name=import_name,
                 attempt_number=attempt_number,
                 ssm_parameters=ssm_parameters,
                 logger=logger,
@@ -580,31 +585,156 @@ def handle_import_complete_success(
     Status: "Complete"
     Condition: recordCount matches DB count (dems_is_transferred = true)
     
-    TODO: Implement:
-    - Update evidence_files table for each file:
-        - evidence_transfer_state_code = 82 (IMPORTED)
-        - dems_is_imported = 1 (true)
-        - dems_imported_id = dems_import_job_id
-        - dems_imported_utc = completedUtc from response
-        - last_modified_process = "lambda: dems import status poller"
-        - last_modified_utc = UTC timestamp
-    - Send message to q-axon-transfer-completion queue with job_id
+    Actions:
+    1. Update ALL evidence_files for this job_id with import success info
+    2. Update evidence_transfer_jobs with completion status
+    3. Send message to q-axon-transfer-completion queue
     """
-    logger.log(
-        event=event,
-        level=LogLevel.INFO,
-        status=LogStatus.SUCCESS,
-        message="handle_import_complete_success_placeholder",
-        context_data={
-            "env_stage": env_stage,
-            "job_id": job_id,
-            "dems_import_job_id": dems_import_job_id,
-            "message": "TODO: Implement happy path handler",
-        },
-    )
-    
-    # TODO: Implement happy path logic
-    return {"status": "success", "path": "happy_path"}
+    try:
+        # Extract completedUtc from response
+        completed_utc = response_data.get("completedUtc")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="handle_import_complete_success_start",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "completed_utc": completed_utc,
+            },
+        )
+        
+        # Get all evidence files for this job to update them
+        evidence_files = db_manager.get_evidence_files_by_job(job_id)
+        
+        if not evidence_files:
+            raise ValueError(f"No evidence files found for job_id: {job_id}")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="evidence_files_retrieved_for_update",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "evidence_file_count": len(evidence_files),
+            },
+        )
+        
+        # Prepare bulk update for evidence_files with import info
+        # Using StatusCodes.IMPORTED (82) for state_code
+        evidence_updates = []
+        for ef in evidence_files:
+            evidence_updates.append((
+                ef['evidence_id'],
+                StatusCodes.IMPORTED,  # 82
+                dems_import_job_id,
+                completed_utc
+            ))
+        
+        # Bulk update all evidence files with import information
+        update_result = db_manager.bulk_update_evidence_files_imported(
+            evidence_updates=evidence_updates,
+            last_modified_process="lambda: dems import status poller"
+        )
+        
+        if not update_result.get("success"):
+            raise Exception(f"Failed to update evidence files: {update_result.get('error')}")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="evidence_files_updated_successfully",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "updated_count": update_result.get("updated_count"),
+            },
+        )
+        
+        # Update evidence_transfer_jobs with IMPORTED status
+        job_update_result = db_manager.update_job_status(
+            job_id=job_id,
+            status_code=StatusCodes.IMPORTED,  # 82
+            job_msg=f"DEMS import completed: {dems_import_job_id}",
+            last_modified_process="lambda: dems import status poller"
+        )
+        
+        if not job_update_result.get("success"):
+            raise Exception(f"Failed to update job status: {job_update_result.get('error')}")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="evidence_transfer_job_updated_successfully",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "status_code": StatusCodes.IMPORTED,
+            },
+        )
+        
+        # Send message to q-axon-transfer-completion.fifo
+        completion_queue_url = ssm_parameters.get("transfer_completion_queue_url")
+        
+        message_body = {"job_id": job_id}
+        message_params = {
+            "QueueUrl": completion_queue_url,
+            "MessageBody": json.dumps(message_body),
+            "MessageGroupId": f"job-{job_id}",
+            "MessageDeduplicationId": f"{job_id}-{int(time.time())}",
+        }
+        
+        sqs_response = sqs_client.send_message(**message_params)
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="completion_queue_message_sent",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "queue_url": completion_queue_url,
+                "message_id": sqs_response.get("MessageId"),
+            },
+        )
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="handle_import_complete_success_completed",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+            },
+        )
+        
+        return {"status": "success", "path": "happy_path"}
+        
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="handle_import_complete_success_error",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+        )
+        raise
 
 
 def handle_import_complete_with_errors(
@@ -663,6 +793,7 @@ def handle_import_in_progress(
     dems_case_id: str,
     dems_import_job_id: str,
     source_path: str,
+    import_name: str,
     attempt_number: int,
     ssm_parameters: Dict[str, str],
     logger: LambdaStructuredLogger,
@@ -685,25 +816,64 @@ def handle_import_in_progress(
         - dems_import_job_id
         - source_path
         - attempt_number = attempt_number + 1
+        - import_name (same as before)
     3. Set MessageDeduplicationId appropriately
     """
+    next_attempt = attempt_number + 1
+    retries_queue_url = ssm_parameters.get("import_status_retries_queue_url")
+    if not retries_queue_url:
+        raise ValueError("Missing SSM parameter: import_status_retries_queue_url")
+
     logger.log(
         event=event,
         level=LogLevel.INFO,
         status=LogStatus.SUCCESS,
-        message="handle_import_in_progress_placeholder",
+        message="handle_import_in_progress_retry_enqueued",
         context_data={
             "env_stage": env_stage,
             "job_id": job_id,
             "dems_import_job_id": dems_import_job_id,
             "current_attempt": attempt_number,
-            "next_attempt": attempt_number + 1,
-            "message": "TODO: Implement retry logic - send message back to queue",
+            "next_attempt": next_attempt,
+            "queue_url": retries_queue_url,
+            "message": "Retrying import status check by re-queueing message",
         },
     )
-    
-    # TODO: Implement retry logic
-    return {"status": "success", "path": "in_progress_retry"}
+
+    message_body = {
+        "job_id": job_id,
+        "dems_case_id": dems_case_id,
+        "dems_import_job_id": dems_import_job_id,
+        "source_path": source_path,
+        "attempt_number": next_attempt,
+        "import_name": import_name,
+    }
+
+    message_params = {
+        "QueueUrl": retries_queue_url,
+        "MessageBody": json.dumps(message_body),
+        "MessageGroupId": f"job-{job_id}",
+        "MessageDeduplicationId": f"{job_id}-{int(time.time())}",
+    }
+
+    sqs_response = sqs_client.send_message(**message_params)
+
+    logger.log(
+        event=event,
+        level=LogLevel.INFO,
+        status=LogStatus.SUCCESS,
+        message="handle_import_in_progress_sqs_sent",
+        context_data={
+            "env_stage": env_stage,
+            "job_id": job_id,
+            "dems_import_job_id": dems_import_job_id,
+            "message_id": sqs_response.get("MessageId"),
+            "queue_url": retries_queue_url,
+            "next_attempt": next_attempt,
+        },
+    )
+
+    return {"status": "success", "path": "in_progress_retry", "message_id": sqs_response.get("MessageId")}
 
 
 def handle_import_max_retries_reached(
@@ -831,6 +1001,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         dems_import_job_id = message_body.get("dems_import_job_id")
         source_path = message_body.get("source_path")
         attempt_number = message_body.get("attempt_number", 1)
+        import_name = message_body.get("import_name")
 
         if not job_id:
             raise ValueError(f"Invalid Job ID: {job_id}")
@@ -853,6 +1024,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "dems_import_job_id": dems_import_job_id,
                 "source_path": source_path,
                 "attempt_number": attempt_number,
+                "import_name": import_name,
             },
         )
 
@@ -862,8 +1034,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Initialize database manager
         db_manager = get_db_manager(env_param_in=env_stage)
 
-        # Get max retries from SSM parameter
-        max_retries = int(ssm_parameters.get("import_status_retries_queue_url", "3"))
+        # Get max retries from SSM parameter (required)
+        max_retries_str = ssm_parameters.get("max_retries")
+        if not max_retries_str:
+            raise ValueError("Missing required SSM parameter: max_retries")
+        max_retries = int(max_retries_str)
         
         logger.log(
             event=event,
@@ -879,15 +1054,58 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
 
         # Call DEMS API to get import status
-        response_data = call_dems_import_status_api(
-            dems_case_id=dems_case_id,
-            dems_import_job_id=dems_import_job_id,
-            base_url=ssm_parameters["import_status_url"],
-            bearer_token=ssm_parameters["bearer"],
-            logger=logger,
-            event=event,
-            env_stage=env_stage,
-        )
+        try:
+            response_data = call_dems_import_status_api(
+                dems_case_id=dems_case_id,
+                dems_import_job_id=dems_import_job_id,
+                base_url=ssm_parameters["import_status_url"],
+                bearer_token=ssm_parameters["bearer"],
+                logger=logger,
+                event=event,
+                env_stage=env_stage,
+            )
+        except Exception as e:
+            logger.log(
+                event=event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
+                message="dems_import_status_api_call_failed",
+                context_data={
+                    "env_stage": env_stage,
+                    "job_id": job_id,
+                    "dems_import_job_id": dems_import_job_id,
+                    "attempt_number": attempt_number,
+                    "max_retries": max_retries,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+
+            if attempt_number < max_retries:
+                return handle_import_in_progress(
+                    job_id=job_id,
+                    dems_case_id=dems_case_id,
+                    dems_import_job_id=dems_import_job_id,
+                    source_path=source_path,
+                    import_name=import_name,
+                    attempt_number=attempt_number,
+                    ssm_parameters=ssm_parameters,
+                    logger=logger,
+                    event=event,
+                    env_stage=env_stage,
+                )
+
+            return handle_import_max_retries_reached(
+                job_id=job_id,
+                dems_case_id=dems_case_id,
+                dems_import_job_id=dems_import_job_id,
+                source_path=source_path,
+                ssm_parameters=ssm_parameters,
+                db_manager=db_manager,
+                logger=logger,
+                event=event,
+                env_stage=env_stage,
+            )
 
         # Evaluate response and handle accordingly
         result = evaluate_and_handle_import_status(
@@ -896,6 +1114,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             dems_case_id=dems_case_id,
             dems_import_job_id=dems_import_job_id,
             source_path=source_path,
+            import_name=import_name,
             attempt_number=attempt_number,
             max_retries=max_retries,
             ssm_parameters=ssm_parameters,
