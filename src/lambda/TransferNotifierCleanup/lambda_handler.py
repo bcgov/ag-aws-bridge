@@ -23,8 +23,8 @@ class Constants:
     REGION_NAME = "ca-central-1"
     AGENCY_LOOKUP_TABLE_NAME = "agency-lookups"
     NOTIFICATION_MATRIX_TABLE = "notification-distribution"
-    HTTP_OK_CODE = 200,
-    HTTP_ERROR_CODE = 400,
+    HTTP_OK_CODE = 200
+    HTTP_ERROR_CODE = 400
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
     FIRST_ATTEMPT_COUNT = 1
     CASE_SHARE_RECEIVED_SQS = "q-axon-case-share-received.fifo"
@@ -36,6 +36,15 @@ class Constants:
     COMPLETED_STATUS = "100"
     TRANSFER_STATE_NOTIFIER_LAMBDA_NAME = "transfer-state-notifier"
     TRANSFER_EXCEPTION_INITIAL_EXCEP_SQS = "q-transfer-exception-early-notify.fifo"
+    INACTIVE_CASE_STATUS = "21"
+    INVALID_AGENCY_IDENTIFIER = "22"
+    FAILED = "110"
+    IMPORT_FAILED = "83"
+    IMPORTED_WITH_ERRORS = "84"
+    IMPORTED = "82"
+    REJECTED_CATEGORY = "rejected"
+    FAILED_CATEGORY = "failed"
+    TRANSFER_ISSUES = "transferredIssues"
 
 class TransferNotifierCleanup:
     """Main class to call the EDT create-load-file-import API to initiate "import" of evidence within EDT's S3 bucket to the particular, relevant target DEMS case"""
@@ -91,8 +100,14 @@ class TransferNotifierCleanup:
             f'/{self.env_stage}/bridge/sqs-queues/url_q-axon-transfer-completion',
             f'/{self.env_stage}/bridge/s3_retention/transferred',
             f'/{self.env_stage}/bridge/lambda/arn-bridge-s3-cleanup',
-            f'/{self.env_stage}/bridge/iam/arn-bridge-s3-cleanup-iam-role'
-
+            f'/{self.env_stage}/bridge/iam/arn-bridge-eventbridgeschedulerexecutionrole',
+            f'/{self.env_stage}/axon/api/categoryId/failed',
+            f'/{self.env_stage}/bridge/s3_retention/failed',
+            f'/{self.env_stage}/axon/api/categoryId/rejected',
+            f'/{self.env_stage}/bridge/s3_retention/rejected',
+            f'/{self.env_stage}/axon/api/categoryId/transferredIssues',
+            f'/{self.env_stage}/bridge/s3_retention/transferredIssues',
+            f'/{self.env_stage}/bridge/sqs-queues/url_q-axon-evidence-category-update'
             ]
         
         try:
@@ -348,13 +363,15 @@ class TransferNotifierCleanup:
         self.send_sqs_message('q-transfer-exception.fifo', job_id, None, current_timestamp, Exception("Download attempt max exceeded"), None, message_attributes=message_attributes)
 
     
-    def send_event_to_event_bridge(self, job_id:str)-> dict:
+    def send_event_to_event_bridge(self, job_id:str, retention_days:str)-> dict:
         try:
-                retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/transferred']
+                if retention_days is None:
+                    retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/transferred']
+
                 int_retention_days = int(retention_days)
                 cleanup_date = datetime.utcnow() + timedelta(days=int_retention_days)
                 schedule_expression = f'at({cleanup_date.strftime("%Y-%m-%dT%H:%M:%S")})'
-                RoleArn = self.parameters[f'/{self.env_stage}/bridge/iam/arn-bridge-s3-cleanup-iam-role']
+                RoleArn = self.parameters[f'/{self.env_stage}/bridge/iam/arn-bridge-eventbridgeschedulerexecutionrole']
                 transfer_job = self.db_manager.get_transfer_job(job_id)
                 if transfer_job:
                     source_path = transfer_job['source_case_id'] + " _ " + transfer_job['dems_case_id'] + "_" + job_id                    
@@ -609,7 +626,7 @@ class TransferNotifierCleanup:
                      self.logger.log_error(event="Transfer Process Notifier failed to create SQS message", error= Exception("Transfer Process Notifier failed to create SQS message"))
                      return {'statusCode': Constants.HTTP_ERROR_CODE, 'body': 'Processing complete'} 
                 
-                eventBridgeReturn = self.send_event_to_event_bridge(job_id)
+                eventBridgeReturn = self.send_event_to_event_bridge(job_id, None)
                 job_msg =  job_msg + " transfer state notification sent. axon category update initiated. bridge s3 cleanup scheduled"
                 self.lambda_update_job_status(job_id, Constants.COMPLETED_STATUS,job_msg )
                 evidence_files = self.db_manager.get_evidence_files_by_job(job_id)
@@ -732,15 +749,17 @@ class TransferNotifierCleanup:
         """Create a properly formatted SQS message for evidence download."""
         try:
 
-            self.sqs.send_message(
+           response =  self.sqs.send_message(
                 QueueUrl=queue_url,
                 MessageBody=json.dumps(body_json),
                 MessageGroupId=messageGroupId,
                 MessageDeduplicationId=messageDeDupId
             
-                )
-            self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent exception message to queue for job {job_id}")
-            return True
+            )
+           self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent exception message to queue for job {job_id}")
+           return {
+                 "sqs_message_id" : response['MessageId']
+                }
         except Exception as e:
              
             self.logger.log_error(event=Constants.PROCESS_NAME, error=e)
@@ -790,22 +809,55 @@ class TransferNotifierCleanup:
                                
                                  if evidence_transfer_job:
                                      agency_code = evidence_transfer_job["bcpsAgencyIdCode"]
-                                     if job_status_code == '21': # invalid-case
+                                     if job_status_code == Constants.INACTIVE_CASE_STATUS: # invalid-case
                                      
                                       body_text = body_text.replace('{{source-case-title}}', evidence_transfer_job['source_case_title'])
                                       body_text = body_text.replace('{{shared-on}}', evidence_transfer_job['source_case_last_modified_utc'])
                                       body_text = body_text.replace('{{current-utc}}', current_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
-                                     elif job_status_code == '22': #INVALID-AGENCY-IDENTIFIER
+                                     elif job_status_code == Constants.INVALID_AGENCY_IDENTIFIER: #INVALID-AGENCY-IDENTIFIER
                                         body_text = body_text.replace('{{source-case-title}}', evidence_transfer_job['source_case_title'])
                                         body_text = body_text.replace('{{shared-on}}', evidence_transfer_job['source_case_last_modified_utc'])
                                         body_text = body_text.replace('{{current-utc}}', current_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
-                                     elif job_status_code == '110' : #FAILED
+                                     elif job_status_code == Constants.FAILED : #FAILED
                                         body_text = body_text.replace('{{source-case-title}}', evidence_transfer_job['source_case_title'])
                                         body_text = body_text.replace('{{shared-on}}', evidence_transfer_job['source_case_last_modified_utc'])
-                                     elif job_status_code.contains('83','84')  : #IMPORTED WITH ERRORS
+                                     elif job_status_code.contains(Constants.IMPORT_FAILED, Constants.IMPORTED_WITH_ERRORS)  :
                                         body_text = body_text.replace('{{source-case-title}}', evidence_transfer_job['source_case_title'])
                                         body_text = body_text.replace('{{shared-on}}', evidence_transfer_job['source_case_last_modified_utc'])
-                                    
+                                        body_text = body_text.replace('{{current-utc}}', current_timestamp.strftime("%Y-%m-%dT%H:%M:%S"))
+                                        body_text = body_text.replace('{{dems-case-id}}', evidence_transfer_job['dems_case_id'])
+                                        body_text = body_text.replace('{{agency-id-code}}', evidence_transfer_job['agency_id_code'])
+                                        body_text = body_text.replace('{{agency-file-id}}', evidence_transfer_job['agency_file_number'])
+                                        # process associated evidence files
+                                        evidence_files = self.db_manager.get_evidence_files_by_job(job_id)
+                                        
+                                        if evidence_files:
+                                        # Define status categories and their corresponding placeholders
+                                            status_configs = [
+                                            {
+                                            'status': Constants.IMPORTED,
+                                            'placeholder': '{successful-imports}',
+                                            'format': lambda file: file['evidence_file_name']
+                                            },
+                                            {
+                                            'status': Constants.IMPORTED_WITH_ERRORS,
+                                            'placeholder': '{files-imported-with-warnings}',
+                                            'format': lambda file: f"{file['evidence_file_name']}: {file.get('dems_imported_error_msg', '')}"
+                                            },
+                                            {
+                                            'status': Constants.IMPORT_FAILED,
+                                            'placeholder': '{files-failed-during-import}',
+                                            'format': lambda file: f"{file['evidence_file_name']}: {file.get('dems_imported_error_msg', '')}"
+                                            }
+                                        ]           
+
+                                        for config in status_configs:
+                                            filtered_files = [file for file in evidence_files if file['evidence_transfer_state_code'] == config['status']]
+                                            if filtered_files:
+                                                lines = [config['format'](file) for file in filtered_files]
+                                                content = '\n'.join(lines)
+                                                if content:
+                                                    body_text = body_text.replace(config['placeholder'], content)
 
                             tenant_id = self.parameters[f'/{self.env_stage}/bridge/notifications/azure_email_tenant']
                             client_id = self.parameters[f'/{self.env_stage}/bridge/notifications/azure_email_client']
@@ -817,12 +869,47 @@ class TransferNotifierCleanup:
                             if returnEmail:
                                 self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent email successfully for  job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
                                 self.sqs_client.delete_message(QueueUrl = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception'], ReceiptHandle=receipt_handle)
+                            
+                            # Determine category type
+                            category_type = self.determine_category_type(job_status_code)
+                            axon_category_id = ""
+                            retention_days = ""
+                            if category_type == Constants.REJECTED_CATEGORY:
+                                 axon_category_id = self.parameters[f'/{self.env_stage}/axon/api/categoryId/rejected']
+                                 retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/rejected']
+                            elif category_type == Constants.FAILED_CATEGORY:
+                                axon_category_id = self.parameters[f'/{self.env_stage}/axon/api/categoryId/failed']
+                                retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/failed']
+                            elif category_type == Constants.TRANSFER_ISSUES:
+                                axon_category_id = self.parameters[f'/{self.env_stage}/axon/api/categoryId/transferredIssues']
+                                retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/transferredIssues']
+
+                            sqs_json = {
+                                 "job_id" : job_id,
+                                 "axon_category_id" : axon_category_id
+                            }
+                            sqs_return = self.create_sqs_message ( job_id, self.parameters[f'/{self.env_stage}/q-axon-evidence-category-update.fifo'],"",sqs_json,f'axon-bridge-job-{job_id}', f'axon-bridge-catid-{axon_category_id}')
+                            self.send_event_to_event_bridge(job_id, retention_days)
+                            if sqs_return:
+                                self.logger.log_sqs_message_sent(self.parameters[f'/{self.env_stage}/q-axon-evidence-category-update.fifo'],sqs_return['sqs_message_id'],sqs_json, 10,job_id=job_id)
                         return True
            except Exception as msg_err:
                 self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
                 raise
           
-
+    def determine_category_type(self, input_job_status:str)-> str:
+       if input_job_status:
+            if input_job_status == Constants.INACTIVE_CASE_STATUS:
+                 return Constants.REJECTED_CATEGORY
+            elif input_job_status == Constants.INVALID_AGENCY_IDENTIFIER:
+                 return Constants.REJECTED_CATEGORY
+            elif input_job_status == Constants.IMPORT_FAILED:
+                 return Constants.FAILED_CATEGORY
+            elif input_job_status == Constants.FAILED:
+                 return Constants.FAILED_CATEGORY
+            elif input_job_status == Constants.IMPORTED_WITH_ERRORS:
+                 return Constants.TRANSFER_ISSUES
+            return None
     def lambda_handler(event, context):
         """Main Lambda handler function."""
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
