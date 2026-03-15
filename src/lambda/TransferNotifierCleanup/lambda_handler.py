@@ -29,6 +29,7 @@ class Constants:
     FIRST_ATTEMPT_COUNT = 1
     CASE_SHARE_RECEIVED_SQS = "q-axon-case-share-received.fifo"
     TRANSFER_COMPLETED_SQS = "q-axon-transfer-completion.fifo"
+    TRANSFER_EXCEPTION_SQS = "q-transfer-exception.fifo"
     NOTIFY_SOURCE_AGENCY = "notify_source_on_complete"
     NOTIFY_BCPS = "notify_bcps_on_complete"
     NOTIFY_SYS_ADMIN = "notify_sysadmin_on_complete"
@@ -388,7 +389,7 @@ class TransferNotifierCleanup:
                 entries = [
                     {
                     'Source': Constants.TRANSFER_STATE_NOTIFIER_LAMBDA_NAME,  # Required: Identify the source
-                    'DetailType': 'MyCustomEvent',    # Required: Event category
+                    'DetailType': 'S3Cleanup_Scheduled',    # Required: Event category
                     'Detail': json.dumps(notification_body),
                     'EventBusName': 'default'        # Optional: Use a custom bus if needed
                     }
@@ -416,14 +417,46 @@ class TransferNotifierCleanup:
                 if response['FailedEntryCount'] > 0:
                      raise Exception("Event publishing failed")
         
-                
+                self.logger.log_success(event="EventBridge schedule created successfully", message=" Schedule ARN : " + response['Entries'][0]['EventId'] + ". S3 Paths to cleanup : " + source_path + "/ and " + source_path + ".zip" )
+                return {
+                     "job_id" : job_id,
+                     "cleanup_date" : cleanup_date ,
+                     "schedule_expression" : schedule_expression,
+                     "schedule_arn" : target_arn,
+                     "schedule_name" : rule_name,
+                     "retention_days" : retention_days
+
+                }
         except Exception as msg_err:
                 self.logger.log_info(event="Sending Processing Failed", job_id=self.job_id)
                 self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
                 raise
 
-           
-    def process_case_share_received(self,  message:dict)-> bool:
+    def prepare_final_logging(self, job_id:str, status_code:str, source_case_id:str, evidence_file_len:int, retention_days:int, cleanup_sched_date:str,sqs_msg_id:str,sched_arn:str, sched_name:str, outcome:str) -> dict:
+       return_dict = {
+            "status_code" : status_code,
+            "body" :{
+                 "job_id": job_id,
+                 "source_case_id" : source_case_id,
+                 "outcome" : outcome,
+                 "base_name" : Constants.PROCESS_NAME,
+                 "evidence_files" : evidence_file_len,
+                 "retention_days" : retention_days,
+                 "cleanup_scheduled_date " : cleanup_sched_date,
+                 "axon_cleanup" : {
+                      "status" : "queued",
+                      "sqs_message_id" : sqs_msg_id
+                 },
+                 "s3_cleanup" : {
+                      "status" : "scheduled",
+                      "schedule_arn" : sched_arn,
+                      "schedule_name" : sched_name
+                 }
+            }
+       }
+       return return_dict
+
+    def process_case_share_received(self,  message:dict)-> dict:
         receipt_handle = message['receiptHandle']
         messageId = message["messageId"]
         source_email_address = self.parameters[f'/{self.env_stage}/bridge/notifications/from_address']
@@ -493,15 +526,18 @@ class TransferNotifierCleanup:
             if returnEmail:
                 self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent email successfully for  job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
                 self.sqs_client.delete_message(QueueUrl = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-axon-case-share-received'], ReceiptHandle=receipt_handle)
-                
-                return True
+                evidence_files = self.db_manager.get_evidence_files(job_id)
+                return self.prepare_final_logging(job_id, Constants.HTTP_OK_CODE, evidence_transfer_job['source_case_id'], len(evidence_files), None, None,None,None, "Process Case Share Processed" )
             else:
                 self.logger.log_error(
                     event="Message Sending Failed",
                     error=Exception("Error sending email "),
                     job_id=job_id
                     )
-                return False
+                return {
+                       "job_id": job_id,
+
+                }
                                
         except Exception as msg_err:
             self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
@@ -531,7 +567,7 @@ class TransferNotifierCleanup:
                 destinationEmails.append(destination)
         return destinationEmails
     
-    def process_transfer_completed(self, message:dict)-> bool:
+    def process_transfer_completed(self, message:dict)-> dict:
         """When a transfer completes in its entirety, successfully.  Distribute a notice (if configured) accordingly.
         """
         receipt_handle = message['receiptHandle']
@@ -588,27 +624,7 @@ class TransferNotifierCleanup:
                             access_token = self.get_access_token(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
                             destinationEmails = self.determineReceipientEmails(item,agency_code)
 
-                            """"
-                            if item.get('SendToBCPS') == 'Y':
-                                    destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_bcps_address']
-                                    destinationEmails.append(destination)
-
-                            elif item.get("SendToSysAdmin") == 'Y':
-                                 destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_sysadmin_address']
-                                 destinationEmails.append(destination)
-                            elif item.get("SendToAgency") == 'Y':
-                               if agency_code:
-                                    agency_dynamo_response = self.agency_code_table.get_item(Key={'bcpsAgencyIdCode': agency_code})
-                                    if agency_dynamo_response:
-                                         item = dynamo_response.get('Item')
-                                         if item :
-                                            destination = item.get('notificationAddress')
-                                            destinationEmails.append(destination)
-                                            
-                            elif item.get("SendToPRIME") == 'Y':
-                                 destination = self.parameters[f'/{self.env_stage}/bridge/notifications/notify_prime_address']
-                                 destinationEmails.append(destination)
-                            """    
+                            
             returnEmail = self.sendEmail(job_id, source_email=source_email_address, destination_emails=destinationEmails,  triggerQueue=Constants.TRANSFER_COMPLETED_SQS, subject_line=subject, body_text=body_text, access_token=access_token)
             if returnEmail:
                 self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent email successfully for  job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
@@ -669,12 +685,13 @@ class TransferNotifierCleanup:
                             query=evidence_file_updates,
                             params=(
                                 status_identifier,
-                                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                eventBridgeReturn['cleanup_date'],
                                 "lambda: transfer process notifier",
                                 evidence_id
                             ), autoCommit=True)
 
-                return True
+                return self.prepare_final_logging(job_id, Constants.HTTP_OK_CODE, evidence_transfer_job['source_case_id'] , len(evidence_files),int(retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/transferred']),
+                                                   eventBridgeReturn['cleanup_date'],sqs_return['sqs_message_id'],eventBridgeReturn['schedule_arn'],eventBridgeReturn['schedule_name'], "Process Transfer Completed successful")
             else:
                 self.logger.log_error(
                     event="Message Sending Failed",
@@ -687,7 +704,7 @@ class TransferNotifierCleanup:
             self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
             raise
 
-    def notify_first_exception_failure(self, job_id:str,message:dict)-> bool:
+    def notify_first_exception_failure(self, job_id:str,message:dict)-> dict:
            """When a transfer encounters an exception of a specific type that can be retried thereafter (such as when a DEMS case is not yet created), distribute an initial notice"""
            attrs = message.get('messageAttributes', {})
            JobStatusCodeId  = attrs['JobStatusCodeId']['stringValue']
@@ -736,8 +753,9 @@ class TransferNotifierCleanup:
                             returnEmail = self.sendEmail(job_id, source_email=source_email_address, destination_emails=destinationEmails,  triggerQueue=Constants.TRANSFER_COMPLETED_SQS, subject_line=subject, body_text=body_text, access_token=access_token)
                             if returnEmail:
                                 self.logger.log_success(event=Constants.PROCESS_NAME, message=f"Sent email successfully for  job_id: {job_id},  environment: {self.env_stage}", job_id=job_id)
-                                self.sqs_client.delete_message(QueueUrl = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception'], ReceiptHandle=receipt_handle)
-                        return True
+                                self.sqs_client.delete_message(QueueUrl = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify'], ReceiptHandle=receipt_handle)
+                        return self.prepare_final_logging(job_id, Constants.HTTP_OK_CODE, evidence_transfer_job['source_case_id'] , 0,int(retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/transferred']),
+                                                   None,None,None,None, "Process Transfer Completed successful")
            except Exception as msg_err:
                 self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
                 raise
@@ -764,7 +782,7 @@ class TransferNotifierCleanup:
              
             self.logger.log_error(event=Constants.PROCESS_NAME, error=e)
             return False
-    def process_transfer_exception_sqs(self, message:dict)-> bool:
+    def process_transfer_exception_sqs(self, message:dict)-> dict:
            """Process a transfer exception message from SQS."""
             
            attrs = message.get('messageAttributes', {})
@@ -775,6 +793,7 @@ class TransferNotifierCleanup:
            receipt_handle = message['receiptHandle']
            messageId = message["messageId"]
            source_email_address = self.parameters[f'/{self.env_stage}/bridge/notifications/from_address']
+           evidence_files_len = 0
            try:
                 job_id = self.get_attr('job_id',attrs)
                 evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
@@ -830,7 +849,7 @@ class TransferNotifierCleanup:
                                         body_text = body_text.replace('{{agency-file-id}}', evidence_transfer_job['agency_file_number'])
                                         # process associated evidence files
                                         evidence_files = self.db_manager.get_evidence_files_by_job(job_id)
-                                        
+                                        evidence_files_len = len(evidence_files)
                                         if evidence_files:
                                         # Define status categories and their corresponding placeholders
                                             status_configs = [
@@ -889,10 +908,11 @@ class TransferNotifierCleanup:
                                  "axon_category_id" : axon_category_id
                             }
                             sqs_return = self.create_sqs_message ( job_id, self.parameters[f'/{self.env_stage}/q-axon-evidence-category-update.fifo'],"",sqs_json,f'axon-bridge-job-{job_id}', f'axon-bridge-catid-{axon_category_id}')
-                            self.send_event_to_event_bridge(job_id, retention_days)
+                            event_bridge_return = self.send_event_to_event_bridge(job_id, retention_days)
                             if sqs_return:
                                 self.logger.log_sqs_message_sent(self.parameters[f'/{self.env_stage}/q-axon-evidence-category-update.fifo'],sqs_return['sqs_message_id'],sqs_json, 10,job_id=job_id)
-                        return True
+                        return self.prepare_final_logging(job_id, Constants.HTTP_OK_CODE, evidence_transfer_job['source_case_id'] , evidence_files_len,int(retention_days = self.parameters[f'/{self.env_stage}/bridge/s3_retention/transferred']),
+                                                   event_bridge_return['cleanup_date'],event_bridge_return['schedule_arn'],event_bridge_return['schedule_name'],'Process Transfer Exception Completed.', "Process Transfer Completed successful")
            except Exception as msg_err:
                 self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
                 raise
@@ -929,9 +949,9 @@ class TransferNotifierCleanup:
                 queue_arn = record['eventSourceARN']
                 queue_name = notifier.get_sqs_queue_calling(queue_arn)
                 job_id = ""
-            
+                transfer_return = {}
                 if queue_name == Constants.CASE_SHARE_RECEIVED_SQS:
-                    notifier.process_case_share_received(record)
+                    transfer_return = notifier.process_case_share_received(record)
                 
                 elif queue_name == Constants.TRANSFER_COMPLETED_SQS:
                     transfer_return = notifier.process_transfer_completed(record)
@@ -940,18 +960,20 @@ class TransferNotifierCleanup:
                     else:
                         job_id = transfer_return.get('job_id')
                 elif queue_name == Constants.TRANSFER_EXCEPTION_INITIAL_EXCEP_SQS:
-                     notifier_return = notifier.notify_first_exception_failure(job_id)
-               
+                     transfer_return = notifier.notify_first_exception_failure(job_id, record)
+                elif queue_name == Constants.TRANSFER_EXCEPTION_SQS:
+                     transfer_return = notifier.process_transfer_exception_sqs(record)
 
                 # Pass the full record (or just the values) to your processor
                 #notifier.process_message(record)
-
+            
             logger.log_success(
                 event="Transfer Notifier End",
                 message="Successfully completed execution",
                 job_id=context.aws_request_id
             )
-            return {'statusCode': Constants.HTTP_OK_CODE, 'body': 'Processing complete'}
+            return transfer_return
+            
 
         except Exception as e:
             logger.log_error(event="Lambda Execution Failed", error=str(e), job_id=getattr(context, 'aws_request_id', 'unknown'))
