@@ -112,9 +112,20 @@ class TransferNotifierCleanup:
             ]
         
         try:
-            ssm_response = self.ssm_client.get_parameters(Names=parameter_names, WithDecryption=True)
-            parameters = {param['Name']: param['Value'] for param in ssm_response['Parameters']}
-            
+            #ssm_response = self.ssm_client.get_parameters(Names=parameter_names, WithDecryption=True)
+           #parameters = {param['Name']: param['Value'] for param in ssm_response['Parameters']}
+            parameters = {}
+            batch_size = 10
+            for i in range(0, len(parameter_names), batch_size):
+                batch = parameter_names[i:i + batch_size]
+                ssm_response = self.ssm_client.get_parameters(Names=batch, WithDecryption=True)
+    
+                if 'InvalidParameters' in ssm_response and len(ssm_response['InvalidParameters']) > 0:
+                    raise ValueError(f"Invalid parameters: {ssm_response['InvalidParameters']}")
+    
+                for param in ssm_response['Parameters']:
+                    parameters[param['Name']] = param['Value']
+
             if ssm_response.get('InvalidParameters'):
                 self.logger.log_error(
                     event="SSM Param Retrieval",
@@ -122,6 +133,7 @@ class TransferNotifierCleanup:
                     job_id=self.job_id
                 )
                 raise ValueError(f"Failed to retrieve some parameters: {ssm_response['InvalidParameters']}")
+            
             
             self.logger.log_success(
                 event="SSM Param Retrieval",
@@ -931,6 +943,18 @@ class TransferNotifierCleanup:
             elif input_job_status == Constants.IMPORTED_WITH_ERRORS:
                  return Constants.TRANSFER_ISSUES
             return None
+       
+    def get_sqs_queue_calling(self, original_arn:str)->str:
+
+        if not original_arn:
+            return ""
+        # arn:aws:sqs:region:account-id:queue-name
+        parts = original_arn.split(':')
+        region = parts[3]
+        account_id = parts[4]
+        queue_name_only = parts[5]
+
+        return queue_name_only
 def lambda_handler(event, context):
         """Main Lambda handler function."""
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
