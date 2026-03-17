@@ -634,8 +634,9 @@ class TransferNotifierCleanup:
                        "axon_category_id" : self.parameters[f'/{self.env_stage}/axon/api/categoryId/transferred']
 
                 }
-                messageGroupId = f'job-id"{job_id}-transfer-completed-{evidence_transfer_job['agency_file_number']}'
-                messageDeDupId = f'job-id"{job_id}-unique-id"{evidence_transfer_job['agency_file_number']}'
+                agency_file_number = evidence_transfer_job['agency_file_number']
+                messageGroupId = f'job-id-{job_id}-transfer-completed-{agency_file_number}'
+                messageDeDupId = f'job-id-{job_id}-unique-id-{agency_file_number}'
                 
                 sqs_return = self.create_sqs_message(job_id=job_id, queue_url=self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-axon-evidence-category-update'],body_json=sqs_body, messageGroupId=messageGroupId, messageDeDupId=messageDeDupId)
                 if not sqs_return:
@@ -930,7 +931,7 @@ class TransferNotifierCleanup:
             elif input_job_status == Constants.IMPORTED_WITH_ERRORS:
                  return Constants.TRANSFER_ISSUES
             return None
-    def lambda_handler(event, context):
+def lambda_handler(event, context):
         """Main Lambda handler function."""
         env_stage = os.environ.get('ENV_STAGE', 'dev-test')
         logger = LambdaStructuredLogger()
