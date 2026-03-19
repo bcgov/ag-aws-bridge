@@ -22,10 +22,11 @@ class Constants:
     PROCESS_NAME = "demsImportRequester"
     REGION_NAME = "ca-central-1"
     AGENCY_LOOKUP_TABLE_NAME = "agency-lookups"
-    HTTP_OK_CODE = 200,
-    HTTP_ERROR_CODE = 400,
+    HTTP_OK_CODE = 200
+    HTTP_ERROR_CODE = 400
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
     FIRST_ATTEMPT_COUNT = 1
+    SQS_DELAY_TIMEOUT_SECS = 900 # 15 mins in seconds
 
 class DemsImportRequester:
     """Main class to call the EDT create-load-file-import API to initiate "import" of evidence within EDT's S3 bucket to the particular, relevant target DEMS case"""
@@ -263,10 +264,13 @@ class DemsImportRequester:
                 return
             return import_id
 
-        except Exception as e:
-            error_msg = f"EDTDEMS API lookup failed for job_id: {job_id} or importname: {importName}. Error: {str(e)}"
-            self.logger.log_error(event="EDTDEMS API lookup Failed", error=error_msg, job_id=self.job_id)
-            raise
+        except botocore.exceptions.ClientError  as e:
+             if e.response['Error']['Code'] == 'ReceiptHandleIsInvalid':
+                    self.logger.log(event=Constants.PROCESS_NAME,  level=LogLevel.WARN, message= "ReceiptHandleIsInvalid – skipping (this is a console test event)")
+             else:
+                error_msg = f"EDTDEMS API lookup failed for job_id: {job_id} or importname: {importName}. Error: {str(e)}"
+                self.logger.log_error(event="EDTDEMS API lookup Failed", error=error_msg, job_id=self.job_id)
+                raise
    
     def process_exception_message(self, job_id:str, message_handle:str, source_case_title:str, job_msg:str, source_queue_url:str )->bool:
         status_code = "IMPORT_FAILED"
@@ -394,7 +398,7 @@ class DemsImportRequester:
             response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-                DelaySeconds=0,
+                DelaySeconds=Constants.SQS_DELAY_TIMEOUT_SECS,
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=message_attributes
@@ -437,7 +441,7 @@ class DemsImportRequester:
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-                DelaySeconds=0,
+                DelaySeconds=Constants.SQS_DELAY_TIMEOUT_SECS,
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=early_notif_message_attributes
@@ -473,7 +477,7 @@ class DemsImportRequester:
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-                DelaySeconds=0,
+                DelaySeconds=Constants.SQS_DELAY_TIMEOUT_SECS,
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=case_found_msg_attrs
@@ -532,7 +536,7 @@ class DemsImportRequester:
             except Exception as mImportIdEx:
                  self.logger.log(
                     event="EDT Dems Import Requester",
-                    status=LogStatus.WARNING,
+                    status=Constants.ERROR,
                     message="API called but no import_id returned",
                     job_id=job_id,
                     custom_metadata={"dems_case_id": dems_case_id, "import_file_path": sourcePath}
