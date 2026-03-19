@@ -22,6 +22,7 @@ class Constants:
     HTTP_OK = 200
     HTTP_BAD_REQUEST = 400,
     EARLY_NOTIFICATION_ATTEMPT_COUNT = 1
+    SQS_SEND_DELAY_SECS = 900 # 15 mins
 
 
 
@@ -301,7 +302,7 @@ class DemsCaseValidator:
             response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_name,
-                DelaySeconds=0,
+                DelaySeconds=Constants.SQS_SEND_DELAY_SECS,
                 MessageGroupId="axon-evidence-transfer",
                 MessageDeduplicationId=job_id,
                 MessageAttributes=message_attributes
