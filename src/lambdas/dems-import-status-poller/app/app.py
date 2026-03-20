@@ -35,8 +35,6 @@ def get_ssm_parameters(
     parameter_paths = {
         "bearer": f"/{env_stage}/edt/api/bearer",
         "import_status_url": f"/{env_stage}/edt/api/import_status_url",
-        "get_list_case_evidence_url": f"/{env_stage}/axon/api/get_list_case_evidence_url",
-        "connection_string": f"/{env_stage}/bridge/tracking-db/connection-string",
         "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
         "transfer_completion_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-transfer-completion",
         "import_status_retries_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-dems-import-status",
@@ -223,6 +221,20 @@ def call_dems_import_status_api(
     http = urllib3.PoolManager()
 
     try:
+        # Log the API endpoint being called
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="call_dems_import_status_api_url",
+            context_data={
+                "env_stage": env_stage,
+                "dems_case_id": dems_case_id,
+                "dems_import_job_id": dems_import_job_id,
+                "url": url,
+            },
+        )
+
         # Make the GET request to DEMS API
         response = http.request(
             "GET",
@@ -231,26 +243,13 @@ def call_dems_import_status_api(
             timeout=30.0,
         )
 
-        # Log the API call result
+        # Log and parse API response
         response_body = response.data.decode("utf-8") if response.data else ""
-        logger.log(
-            event=event,
-            level=LogLevel.INFO,
-            status=LogStatus.SUCCESS,
-            message="call_dems_import_status_api_response",
-            context_data={
-                "env_stage": env_stage,
-                "dems_case_id": dems_case_id,
-                "dems_import_job_id": dems_import_job_id,
-                "status_code": response.status,
-                "response_body": response_body,
-            },
-        )
-
-        # Parse and return the response
+        parsed_response = {}
         try:
-            return json.loads(response_body) if response_body else {}
+            parsed_response = json.loads(response_body) if response_body else {}
         except json.JSONDecodeError:
+            parsed_response = {"raw_response": response_body}
             logger.log(
                 event=event,
                 level=LogLevel.WARNING,
@@ -263,7 +262,39 @@ def call_dems_import_status_api(
                     "response_body": response_body,
                 },
             )
-            return {"raw_response": response_body, "status_code": response.status}
+
+        # Any non-200 HTTP status is considered API failure and follows error path
+        if response.status != 200:
+            logger.log(
+                event=event,
+                level=LogLevel.ERROR,
+                status=LogStatus.FAILURE,
+                message="call_dems_import_status_api_non_200_response",
+                context_data={
+                    "env_stage": env_stage,
+                    "dems_case_id": dems_case_id,
+                    "dems_import_job_id": dems_import_job_id,
+                    "status_code": response.status,
+                    "response_body": parsed_response,
+                },
+            )
+            raise ValueError(f"DEMS API returned non-200 status code: {response.status}")
+
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="call_dems_import_status_api_response",
+            context_data={
+                "env_stage": env_stage,
+                "dems_case_id": dems_case_id,
+                "dems_import_job_id": dems_import_job_id,
+                "status_code": response.status,
+                "response_body": parsed_response,
+            },
+        )
+
+        return parsed_response
 
     except (urllib3.exceptions.TimeoutError, urllib3.exceptions.ConnectionError) as e:
         logger.log(
@@ -336,6 +367,56 @@ def evaluate_and_handle_import_status(
     """
     status = response_data.get("status")
     record_count = response_data.get("recordCount")
+
+    # If API payload contains numeric HTTP-like status (e.g., 500), treat as error path
+    payload_status_code = None
+    if isinstance(status, int):
+        payload_status_code = status
+    elif isinstance(status, str) and status.isdigit():
+        payload_status_code = int(status)
+
+    if payload_status_code is not None and payload_status_code != 200:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="evaluate_import_status_payload_non_200",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "payload_status_code": payload_status_code,
+                "title": response_data.get("title"),
+                "attempt_number": attempt_number,
+                "max_retries": max_retries,
+            },
+        )
+
+        if attempt_number < max_retries:
+            return handle_import_in_progress(
+                job_id=job_id,
+                dems_case_id=dems_case_id,
+                dems_import_job_id=dems_import_job_id,
+                source_path=source_path,
+                import_name=import_name,
+                attempt_number=attempt_number,
+                ssm_parameters=ssm_parameters,
+                logger=logger,
+                event=event,
+                env_stage=env_stage,
+            )
+
+        return handle_import_max_retries_reached(
+            job_id=job_id,
+            dems_case_id=dems_case_id,
+            dems_import_job_id=dems_import_job_id,
+            source_path=source_path,
+            ssm_parameters=ssm_parameters,
+            db_manager=db_manager,
+            logger=logger,
+            event=event,
+            env_stage=env_stage,
+        )
     
     logger.log(
         event=event,
@@ -625,25 +706,17 @@ def handle_import_complete_success(
             },
         )
         
-        # Prepare bulk update for evidence_files with import info
+        # Update all evidence files with import success info
         # Using StatusCodes.IMPORTED (82) for state_code
-        evidence_updates = []
         for ef in evidence_files:
-            evidence_updates.append((
-                ef['evidence_id'],
-                StatusCodes.IMPORTED,  # 82
-                dems_import_job_id,
-                completed_utc
-            ))
-        
-        # Bulk update all evidence files with import information
-        update_result = db_manager.bulk_update_evidence_files_imported(
-            evidence_updates=evidence_updates,
-            last_modified_process="lambda: dems import status poller"
-        )
-        
-        if not update_result.get("success"):
-            raise Exception(f"Failed to update evidence files: {update_result.get('error')}")
+            db_manager.mark_file_imported(
+                evidence_id=ef['evidence_id'],
+                dems_imported_id=dems_import_job_id,
+                error_msg=None,
+                evidence_transfer_state_code=StatusCodes.IMPORTED,  # 82
+                dems_imported_utc=completed_utc,
+                last_modified_process="lambda: dems import status poller"
+            )
         
         logger.log(
             event=event,
@@ -653,7 +726,7 @@ def handle_import_complete_success(
             context_data={
                 "env_stage": env_stage,
                 "job_id": job_id,
-                "updated_count": update_result.get("updated_count"),
+                "evidence_file_count": len(evidence_files),
             },
         )
         
@@ -665,8 +738,8 @@ def handle_import_complete_success(
             last_modified_process="lambda: dems import status poller"
         )
         
-        if not job_update_result.get("success"):
-            raise Exception(f"Failed to update job status: {job_update_result.get('error')}")
+        if not job_update_result:
+            raise Exception(f"Failed to update job status for job_id: {job_id}")
         
         logger.log(
             event=event,
@@ -756,36 +829,296 @@ def handle_import_complete_with_errors(
               "Completed with warnings", "Completed with errors prematurely"
     OR: Status "Complete" but recordCount doesn't match DB count
     
-    TODO: Implement:
-    1. Evaluate how many files succeeded (recordCount)
-    2. Collect fatal errors (null itemId in messages)
-    3. Collect non-fatal errors (itemId present in messages)
-    4. Correlate errors to evidence_file_name in DB
-    5. Update evidence_files for each file:
-        - Fatal error: state_code=83, dems_is_imported=0, error_msg="fatal error: {messageText}"
-        - Non-fatal: state_code=84, dems_is_imported=1, error_msg="non-fatal error: {messageText}"
-        - Success: state_code=82, dems_is_imported=1 (files not in error messages)
-    6. Update evidence_transfer_jobs:
-        - If fatal errors: state_code=83, job_msg="DEMS import failed with fatal errors"
-        - If only non-fatal: state_code=84, job_msg="DEMS import completed with non-fatal errors"
-    7. Send message to q-transfer-exception.fifo with job_id
+    Actions:
+    1. Parse messages and categorize by itemId (null=fatal, present=non-fatal)
+    2. Extract filenames from messageText and correlate to evidence_file_name
+    3. Group error messages by file (concatenate with "; " separator)
+    4. Load all evidence_files for job and update each based on error status
+    5. Update evidence_transfer_jobs based on fatal vs non-fatal error presence
+    6. Send exception message to q-transfer-exception.fifo
     """
-    logger.log(
-        event=event,
-        level=LogLevel.WARNING,
-        status=LogStatus.SUCCESS,
-        message="handle_import_complete_with_errors_placeholder",
-        context_data={
-            "env_stage": env_stage,
-            "job_id": job_id,
-            "dems_import_job_id": dems_import_job_id,
-            "message": "TODO: Implement alternate path (errors) handler",
-            "response_messages_count": len(response_data.get("messages", [])),
-        },
-    )
-    
-    # TODO: Implement alternate path logic
-    return {"status": "success", "path": "alternate_path_with_errors"}
+    try:
+        completed_utc = response_data.get("completedUtc")
+        messages = response_data.get("messages", [])
+        
+        logger.log(
+            event=event,
+            level=LogLevel.WARNING,
+            status=LogStatus.SUCCESS,
+            message="handle_import_complete_with_errors_start",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "messages_count": len(messages),
+                "completed_utc": completed_utc,
+            },
+        )
+        
+        # Parse and categorize errors
+        fatal_errors = {}  # filename -> list of messageTexts
+        non_fatal_errors = {}  # filename -> list of messageTexts
+        
+        for msg in messages:
+            item_id = msg.get("itemId")
+            message_text = msg.get("messageText", "")
+            
+            # Extract filename from messageText (last part after last \ or /)
+            filename = message_text
+            for sep in ['\\', '/']:
+                if sep in message_text:
+                    filename = message_text.split(sep)[-1].split(':')[0]
+                    break
+            
+            is_fatal = item_id is None
+            error_dict = fatal_errors if is_fatal else non_fatal_errors
+            
+            if filename not in error_dict:
+                error_dict[filename] = []
+            error_dict[filename].append(message_text)
+        
+        logger.log(
+            event=event,
+            level=LogLevel.WARNING,
+            status=LogStatus.SUCCESS,
+            message="errors_parsed_and_categorized",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "fatal_error_files": len(fatal_errors),
+                "non_fatal_error_files": len(non_fatal_errors),
+            },
+        )
+        
+        # Load all evidence files for this job
+        evidence_files = db_manager.get_evidence_files_by_job(job_id)
+        if not evidence_files:
+            raise ValueError(f"No evidence files found for job_id: {job_id}")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="evidence_files_loaded",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "evidence_file_count": len(evidence_files),
+            },
+        )
+        
+        # Build update lists for evidence_files
+        # Format: (evidence_id, state_code, dems_imported_id, dems_imported_utc, error_msg)
+        fatal_file_updates = []
+        non_fatal_file_updates = []
+        success_file_updates = []
+        
+        # Map evidence_file_name to evidence_id for correlation
+        for ef in evidence_files:
+            evidence_file_name = ef.get("evidence_file_name") or ""
+            evidence_id = ef.get("evidence_id")
+            
+            # Skip files with no filename (shouldn't happen, but guard against it)
+            if not evidence_file_name:
+                success_file_updates.append({
+                    "evidence_id": evidence_id,
+                    "state_code": StatusCodes.IMPORTED,  # 82
+                    "dems_imported_id": dems_import_job_id,
+                })
+                continue
+            
+            # Check if this file has fatal errors
+            has_fatal = any(evidence_file_name in fname for fname in fatal_errors.keys())
+            if has_fatal:
+                # Find matching error messages
+                for err_fname in fatal_errors:
+                    if evidence_file_name in err_fname or err_fname in evidence_file_name:
+                        error_messages = fatal_errors[err_fname]
+                        concatenated_error = "; ".join(error_messages)
+                        fatal_file_updates.append({
+                            "evidence_id": evidence_id,
+                            "state_code": StatusCodes.IMPORT_FAILED,  # 83
+                            "error_msg": f"fatal error: {concatenated_error}",
+                        })
+                        break
+            
+            # Check if this file has non-fatal errors
+            elif any(evidence_file_name in fname for fname in non_fatal_errors.keys()):
+                for err_fname in non_fatal_errors:
+                    if evidence_file_name in err_fname or err_fname in evidence_file_name:
+                        error_messages = non_fatal_errors[err_fname]
+                        concatenated_error = "; ".join(error_messages)
+                        non_fatal_file_updates.append({
+                            "evidence_id": evidence_id,
+                            "state_code": StatusCodes.IMPORTED_WITH_ERRORS,  # 84
+                            "dems_imported_id": dems_import_job_id,
+                            "error_msg": f"non-fatal error: {concatenated_error}",
+                        })
+                        break
+            
+            # File not in any error list - it succeeded
+            else:
+                success_file_updates.append({
+                    "evidence_id": evidence_id,
+                    "state_code": StatusCodes.IMPORTED,  # 82
+                    "dems_imported_id": dems_import_job_id,
+                })
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="file_update_lists_prepared",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "fatal_count": len(fatal_file_updates),
+                "non_fatal_count": len(non_fatal_file_updates),
+                "success_count": len(success_file_updates),
+            },
+        )
+        
+        # Update fatal error files
+        if fatal_file_updates:
+            for update in fatal_file_updates:
+                db_manager.mark_file_imported(
+                    evidence_id=update["evidence_id"],
+                    dems_imported_id=None,
+                    error_msg=update["error_msg"],
+                    evidence_transfer_state_code=StatusCodes.IMPORT_FAILED,  # 83
+                    dems_imported_utc=completed_utc,
+                    last_modified_process="lambda: dems import status poller"
+                )
+        
+        # Update non-fatal error files
+        if non_fatal_file_updates:
+            for update in non_fatal_file_updates:
+                db_manager.mark_file_imported(
+                    evidence_id=update["evidence_id"],
+                    dems_imported_id=update["dems_imported_id"],
+                    error_msg=update["error_msg"],
+                    evidence_transfer_state_code=StatusCodes.IMPORTED_WITH_ERRORS,  # 84
+                    dems_imported_utc=completed_utc,
+                    last_modified_process="lambda: dems import status poller"
+                )
+        
+        # Update successful files
+        if success_file_updates:
+            for update in success_file_updates:
+                db_manager.mark_file_imported(
+                    evidence_id=update["evidence_id"],
+                    dems_imported_id=update["dems_imported_id"],
+                    error_msg=None,
+                    evidence_transfer_state_code=StatusCodes.IMPORTED,  # 82
+                    dems_imported_utc=completed_utc,
+                    last_modified_process="lambda: dems import status poller"
+                )
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="evidence_files_updated",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "fatal_updated": len(fatal_file_updates),
+                "non_fatal_updated": len(non_fatal_file_updates),
+                "success_updated": len(success_file_updates),
+            },
+        )
+        
+        # Determine job status based on error types
+        if fatal_file_updates:
+            job_status_code = StatusCodes.IMPORT_FAILED  # 83
+            job_msg = f"DEMS import failed with one or more fatal errors: {dems_import_job_id}"
+        elif non_fatal_file_updates:
+            job_status_code = StatusCodes.IMPORTED_WITH_ERRORS  # 84
+            job_msg = f"DEMS import completed with one or more non-fatal errors: {dems_import_job_id}"
+        else:
+            job_status_code = StatusCodes.IMPORTED  # 82
+            job_msg = f"DEMS import completed: {dems_import_job_id}"
+        
+        # Update job status
+        job_update_result = db_manager.update_job_status(
+            job_id=job_id,
+            status_code=job_status_code,
+            job_msg=job_msg,
+            last_modified_process="lambda: dems import status poller"
+        )
+        
+        if not job_update_result:
+            raise Exception(f"Failed to update job status for job_id: {job_id}")
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="job_status_updated",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "status_code": job_status_code,
+                "job_msg": job_msg,
+            },
+        )
+        
+        # Send exception message to q-transfer-exception.fifo
+        exception_queue_url = ssm_parameters.get("transfer_exception_queue_url")
+        message_body = {"job_id": job_id}
+        message_params = {
+            "QueueUrl": exception_queue_url,
+            "MessageBody": json.dumps(message_body),
+            "MessageGroupId": f"job-{job_id}",
+            "MessageDeduplicationId": f"{job_id}-{int(time.time())}",
+        }
+        
+        sqs_response = sqs_client.send_message(**message_params)
+        
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="exception_queue_message_sent",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "queue_url": exception_queue_url,
+                "message_id": sqs_response.get("MessageId"),
+            },
+        )
+        
+        logger.log(
+            event=event,
+            level=LogLevel.WARNING,
+            status=LogStatus.SUCCESS,
+            message="handle_import_complete_with_errors_completed",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "has_fatal_errors": len(fatal_file_updates) > 0,
+                "has_non_fatal_errors": len(non_fatal_file_updates) > 0,
+            },
+        )
+        
+        return {"status": "success", "path": "alternate_path_with_errors"}
+        
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="handle_import_complete_with_errors_error",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+        )
+        raise
 
 
 def handle_import_in_progress(
@@ -906,21 +1239,109 @@ def handle_import_max_retries_reached(
         - last_modified_utc = UTC timestamp
     3. Send message to q-transfer-exception.fifo with job_id
     """
-    logger.log(
-        event=event,
-        level=LogLevel.ERROR,
-        status=LogStatus.FAILURE,
-        message="handle_import_max_retries_reached_placeholder",
-        context_data={
-            "env_stage": env_stage,
-            "job_id": job_id,
-            "dems_import_job_id": dems_import_job_id,
-            "message": "TODO: Implement exception path - max retries reached",
-        },
-    )
-    
-    # TODO: Implement exception path logic
-    return {"status": "failure", "path": "max_retries_exceeded"}
+    try:
+        error_message = "Import is failing for some reason; maximum time allowed reached"
+
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="handle_import_max_retries_reached_start",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "error_message": error_message,
+            },
+        )
+
+        # Update parent job status
+        job_update_result = db_manager.update_job_status(
+            job_id=job_id,
+            status_code=StatusCodes.IMPORT_FAILED,
+            job_msg=error_message,
+            last_modified_process="lambda: dems import status poller",
+        )
+        if not job_update_result:
+            raise ValueError(f"Failed to update evidence_transfer_jobs for job_id: {job_id}")
+
+        # Update all evidence files for this job
+        evidence_files = db_manager.get_evidence_files_by_job(job_id)
+        updated_files_count = 0
+
+        for evidence_file in evidence_files:
+            evidence_id = evidence_file.get("evidence_id")
+            update_result = db_manager.mark_file_imported(
+                evidence_id=evidence_id,
+                dems_imported_id=None,
+                error_msg=error_message,
+                evidence_transfer_state_code=StatusCodes.IMPORT_FAILED,  # 83
+                dems_imported_utc=None,
+                last_modified_process="lambda: dems import status poller"
+            )
+            if update_result:
+                updated_files_count += 1
+
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="handle_import_max_retries_reached_db_updates_completed",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "updated_files_count": updated_files_count,
+                "total_files_count": len(evidence_files),
+            },
+        )
+
+        # Send to exception queue
+        exception_queue_url = ssm_parameters.get("transfer_exception_queue_url")
+        if not exception_queue_url:
+            raise ValueError("Missing SSM parameter: transfer_exception_queue_url")
+
+        sqs_response = sqs_client.send_message(
+            QueueUrl=exception_queue_url,
+            MessageBody=json.dumps({"job_id": job_id}),
+            MessageGroupId=f"job-{job_id}",
+            MessageDeduplicationId=f"{job_id}",
+        )
+
+        logger.log(
+            event=event,
+            level=LogLevel.INFO,
+            status=LogStatus.SUCCESS,
+            message="handle_import_max_retries_reached_exception_message_sent",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "queue_url": exception_queue_url,
+                "message_id": sqs_response.get("MessageId"),
+            },
+        )
+
+        return {
+            "status": "failure",
+            "path": "max_retries_exceeded",
+            "updated_files_count": updated_files_count,
+            "exception_message_id": sqs_response.get("MessageId"),
+        }
+
+    except Exception as e:
+        logger.log(
+            event=event,
+            level=LogLevel.ERROR,
+            status=LogStatus.FAILURE,
+            message="handle_import_max_retries_reached_error",
+            context_data={
+                "env_stage": env_stage,
+                "job_id": job_id,
+                "dems_import_job_id": dems_import_job_id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+        )
+        raise
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -1138,9 +1559,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             },
         )
 
-        # Log the end of the function
-        logger.log_end(event="dems_import_status_poller", job_id=request_id)
-
         return {
             "statusCode": 200,
             "body": json.dumps({
@@ -1166,8 +1584,5 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "error_type": type(e).__name__,
             },
         )
-
-        # Log the end of the function with error
-        logger.log_end(event="dems_import_status_poller", job_id=request_id)
 
         raise

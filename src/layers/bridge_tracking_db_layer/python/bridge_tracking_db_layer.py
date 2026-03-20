@@ -373,6 +373,80 @@ class DatabaseManager:
                         "updated_count": 0,
                     }
 
+    def bulk_update_evidence_files_imported(
+        self,
+        evidence_updates: List[Tuple[str, int, str, str]],
+        last_modified_process: str,
+    ) -> Dict[str, Any]:
+        """
+        Atomically update multiple evidence files with import information.
+        
+        Args:
+            evidence_updates: List of (evidence_id, state_code, dems_import_job_id, dems_imported_utc) tuples
+            last_modified_process: Process identifier for audit trail
+            
+        Updates:
+            - evidence_transfer_state_code
+            - dems_is_imported = true
+            - dems_imported_id
+            - dems_imported_utc
+            - last_modified_process
+            - last_modified_utc
+            
+        Returns:
+            Dict with success status, updated files, and count
+        """
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                try:
+                    cursor.execute("BEGIN")
+
+                    updated_files = []
+
+                    for evidence_id, state_code, dems_import_job_id, dems_imported_utc in evidence_updates:
+                        update_query = """
+                            UPDATE evidence_files
+                            SET evidence_transfer_state_code = %s,
+                                dems_is_imported = true,
+                                dems_imported_id = %s,
+                                dems_imported_utc = %s,
+                                last_modified_process = %s,
+                                last_modified_utc = NOW()
+                            WHERE evidence_id = %s
+                            RETURNING *
+                        """
+                        cursor.execute(
+                            update_query,
+                            (
+                                state_code,
+                                dems_import_job_id,
+                                dems_imported_utc,
+                                last_modified_process,
+                                evidence_id,
+                            ),
+                        )
+                        if cursor.rowcount > 0:
+                            updated_file = dict(cursor.fetchone())
+                            updated_files.append(updated_file)
+
+                    cursor.execute("COMMIT")
+
+                    return {
+                        "success": True,
+                        "updated_files": updated_files,
+                        "updated_count": len(updated_files),
+                    }
+
+                except Exception as e:
+                    cursor.execute("ROLLBACK")
+                    logger.error(f"Bulk evidence file import update failed: {e}")
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "updated_files": [],
+                        "updated_count": 0,
+                    }
+
     def create_evidence_transfer_job(self, job_data: Dict[str, Any]) -> Dict:
         """Create a new evidence transfer job."""
         query = """
@@ -591,17 +665,37 @@ class DatabaseManager:
         return self.execute_query_one(query, (is_transferred, error_msg, last_modified_process, evidence_id))
     
     def mark_file_imported(self, evidence_id: str, dems_imported_id: str = None, 
-                          error_msg: str = None, last_modified_process: str = None) -> Dict:
-        """Mark file as imported into DEMS (or failed)."""
-        is_imported = error_msg is None
+                          error_msg: str = None, last_modified_process: str = None,
+                          evidence_transfer_state_code: int = None, dems_imported_utc: str = None) -> Dict:
+        """Mark file as imported into DEMS (or failed).
+        
+        Args:
+            evidence_id: The evidence file ID
+            dems_imported_id: Optional DEMS import job ID (set to None for fatal errors)
+            error_msg: Optional error message (non-fatal errors allowed)
+            last_modified_process: Optional process that modified the record
+            evidence_transfer_state_code: Optional state code (82=IMPORTED, 83=FAILED, 84=WITH_ERRORS)
+            dems_imported_utc: Optional import completion timestamp (use API completedUtc instead of NOW())
+        
+        Returns:
+            Dict with updated record or error
+        """
+        # For non-fatal errors (error_msg present, dems_imported_id present), mark as imported
+        # For fatal errors (error_msg present, dems_imported_id=None), mark as not imported
+        # For success (no error), mark as imported
+        is_imported = dems_imported_id is not None
+        
         query = """
             UPDATE evidence_files 
             SET dems_is_imported = %s, dems_imported_id = %s, dems_imported_error_msg = %s,
-                dems_imported_utc = NOW(), last_modified_process = %s, last_modified_utc = NOW()
+                evidence_transfer_state_code = COALESCE(%s, evidence_transfer_state_code),
+                dems_imported_utc = COALESCE(%s::timestamp, NOW()), 
+                last_modified_process = %s, last_modified_utc = NOW()
             WHERE evidence_id = %s 
             RETURNING *
         """
         return self.execute_query_one(query, (is_imported, dems_imported_id, error_msg, 
+                                            evidence_transfer_state_code, dems_imported_utc,
                                             last_modified_process, evidence_id), True)
     
     # this is just a testing method, safe to remove after release
@@ -1057,6 +1151,7 @@ class StatusCodes:
     IMPORT_REQUESTED = 81
     IMPORTED = 82
     IMPORT_FAILED = 83
+    IMPORTED_WITH_ERRORS = 84
     COMPLETED = 100
     FAILED = 110
     CANCELLED = 120
