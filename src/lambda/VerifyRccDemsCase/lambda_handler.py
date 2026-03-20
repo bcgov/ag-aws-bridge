@@ -20,7 +20,10 @@ class Constants:
     ERROR = "ERROR",
     PROCESS_NAME = "axonRccAndDemsCaseValidator"
     HTTP_OK = 200
-    HTTP_BAD_REQUEST = 400
+    HTTP_BAD_REQUEST = 400,
+    EARLY_NOTIFICATION_ATTEMPT_COUNT = 1
+    SQS_SEND_DELAY_SECS = 900 # 15 mins
+
 
 
 
@@ -61,7 +64,9 @@ class DemsCaseValidator:
             f'/{self.env_stage}/isl_endpoint_secret',
             f'/{self.env_stage}/isl_endpoint/case_id_method',
             f'/{self.env_stage}/axon/api/client_id',
-            f'/{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries'
+            f'/{self.env_stage}/bridge/sqs-queues/lambda-rcc-dems-case-validator-retries',
+            f'/{self.env_stage}/edt/valid-case-id-threshold'
+
         ]
         
         try:
@@ -278,8 +283,8 @@ class DemsCaseValidator:
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
             if not message_attributes:
                 message_attributes = {
-                    'Job_id': {'DataType': 'String', 'StringValue': job_id},
-                    'Source_case_id': {'DataType': 'String', 'StringValue': case_id}
+                    'job_id': {'DataType': 'String', 'StringValue': job_id},
+                    'source_case_id': {'DataType': 'String', 'StringValue': case_id}
                 }
             # Add exception message to message attributes if custom_exception is provided
             if custom_exception:
@@ -289,7 +294,7 @@ class DemsCaseValidator:
                 }
             # Add case_title to message attributes if case_title is not None
             if case_title is not None and message_attributes is not None:
-                message_attributes['Case_title'] = {
+                message_attributes['case_title'] = {
                     'DataType': 'String',
                     'StringValue': case_title[:256],  # Ensure case_title adheres to SQS 256-byte limit
                 }
@@ -297,7 +302,7 @@ class DemsCaseValidator:
             response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_name,
-                DelaySeconds=0,
+                DelaySeconds=Constants.SQS_SEND_DELAY_SECS,
                 MessageGroupId="axon-evidence-transfer",
                 MessageDeduplicationId=job_id,
                 MessageAttributes=message_attributes
@@ -325,6 +330,32 @@ class DemsCaseValidator:
         except Exception as e:
             self.logger.log_error(event="SQS Message Send Failed", error=e, job_id=self.job_id)
 
+    def create_early_no_case_found_sqs_message(job_id:str, source_case_title:str,JobStatusCodeId : str )->dict:
+
+     return {
+        'Id': job_id,  # Must be unique within the batch
+        'MessageBody': json.dumps({
+            'job_id': job_id,
+            'source_case_title ': source_case_title,
+            "JobStatusCodeId" : JobStatusCodeId
+        }),
+        'MessageGroupId': f"job-{job_id}",  # Required for FIFO queues
+        'MessageDeduplicationId': f"{job_id}-{JobStatusCodeId}",  # Required for FIFO queues
+        'MessageAttributes': {
+                'job_id': {
+                'StringValue': job_id,
+                'DataType': 'String'
+            },
+            'source_case_title': {  # Added evidence_id as message attribute
+                'StringValue': source_case_title,
+                'DataType': 'String'
+            },
+              'JobStatusCodeId': {  # Added evidence_id as message attribute
+                'StringValue': JobStatusCodeId,
+                'DataType': 'String'
+            }
+        }
+    }
     def process_message(self, message: dict):
         """Process a single SQS message."""
         try:
@@ -360,6 +391,7 @@ class DemsCaseValidator:
             
             dems_api_url = self.parameters[f'/{self.env_stage}/isl_endpoint_url'] + self.parameters[f'/{self.env_stage}/isl_endpoint/case_id_method']
             bearer_token = self.parameters[f'/{self.env_stage}/isl_endpoint_secret']
+            dems_case_id_threshold = int(self.parameters[f'{self.env_stage}/edt/valid-case-id-threshold'])
             agency_codes_to_try = [agency_id_code] + (sub_agencies if sub_agency_yn == 'Y' else [])
             found_dems_case = False
 
@@ -367,10 +399,16 @@ class DemsCaseValidator:
                 status, dems_case_id = self.call_dems_api(dems_api_url, bearer_token, code, agency_file_number)
                 
                 if status == Constants.HTTP_OK and dems_case_id:
-                    self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
-                    self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
-                    found_dems_case = True
-                    break
+                    int_dems_case_id = int(dems_case_id)
+                    if int_dems_case_id > dems_case_id_threshold:
+
+                        self.db_manager.set_dems_case(job_id, dems_case_id, "Verify Rcc Dems Case")
+                        self.logger.log_success(event="DEMS Case Found", message=f"DEMS case ID: {dems_case_id}", job_id=job_id)
+                        found_dems_case = True
+                        break
+                    elif int_dems_case_id <= dems_case_id_threshold:
+                        self.process_no_case_found(job_id, agency_id_code, agency_file_number,"dems case not found. Retrying",attenmpt_number,first_attempt_time, message['receiptHandle'], case_title)
+                        
                 elif status >= Constants.HTTP_BAD_REQUEST:
                     self.logger.log_error(event="DEMS API Error", error=f"HTTP error: {status}", job_id=job_id)
             
@@ -407,7 +445,12 @@ class DemsCaseValidator:
                     job_id=job_id,
                     custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_number}
                 )
-                self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
+                if attenmpt_number == Constants.EARLY_NOTIFICATION_ATTEMPT_COUNT:
+                    sqs_msg_attributes= self.create_early_no_case_found_sqs_message(job_id,source_case_title=case_title,JobStatusCodeId=cadJurId)
+                    self.send_sqs_message('q-transfer-exception-early-notify.fifo', job_id, case_title, current_timestamp,  case_title, message_attributes=sqs_msg_attributes)
+
+                else:
+                    self.send_sqs_message('q-transfer-exception.fifo', job_id, case_title, current_timestamp, Exception("Case not found"), case_title)
                 
         except Exception as msg_err:
             self.logger.log_error(event="Message Processing Failed", error=str(msg_err), job_id=self.job_id)
