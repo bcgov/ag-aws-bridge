@@ -202,6 +202,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "${AWS::StackName}-DemsImportStatusPollerFunction"
+      Role: arn:aws:iam::731386536779:role/bridge-dems-import-status-role
       CodeUri: src/lambdas/dems-import-status-poller
       Handler: app/app.lambda_handler
       Runtime: python3.11
