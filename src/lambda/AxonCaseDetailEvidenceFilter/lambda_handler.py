@@ -22,6 +22,7 @@ class Constants:
 
   # 10GB
     SQS_BATCH_SIZE = 10
+    
 
 logger = LambdaStructuredLogger()
 db_manager = None
@@ -140,6 +141,7 @@ def send_exception_message(exception_queue_url: str, job_id: str, evidence_id: s
         sqs.send_message(
             QueueUrl=exception_queue_url,
             MessageBody=json.dumps(exception_data),
+            
             MessageGroupId=f"exceptions-{job_id}" if job_id else "exceptions-general",
             MessageDeduplicationId=f"{job_id}-{evidence_id}-{hash(error_message)}" if evidence_id else f"{job_id}-general-{hash(error_message)}"
         )
@@ -160,7 +162,8 @@ def create_sqs_message(job_id: str, evidence_id: str, source_case_id: str, evide
             'evidence_id': evidence_id
         }),
         'MessageGroupId': f"job-{job_id}",  # Required for FIFO queues
-        'MessageDeduplicationId': f"{job_id}-{evidence_file_id}",  # Required for FIFO queues
+        'MessageDeduplicationId': f"{job_id}-{evidence_file_id}",
+      
         'MessageAttributes': {
             'JobId': {
                 'StringValue': job_id,
@@ -614,6 +617,7 @@ def process_evidence_records(
                 sqs = boto3.client('sqs')
                 sqs.send_message(
                 QueueUrl=config['transfer_exception_queue_url'],
+               
                 MessageBody=json.dumps(exception_data),
                 MessageGroupId=f"exceptions-{job_id}" if job_id else "exceptions-general",
                 MessageDeduplicationId=f"{job_id}-{evidence_id}-{hash(error_message)}" if evidence_id else f"{job_id}-general-{hash(error_message)}"
@@ -634,8 +638,8 @@ def process_evidence_records(
             for file_entry in files_data:
                  # Extract file attributes
                 file_attributes = file_entry.get("attributes", {})
-                if not isinstance(file_attributes, list):
-                    logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Files attributes is not a list for evidence_id {evidence_id}: {file_attributes}"))
+                if not isinstance(file_attributes, dict) or not file_attributes:
+                    logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Files attributes is not a dict for evidence_id {evidence_id}: {file_attributes}"))
                     continue
                 # Validate required file fields
                 file_id = file_entry.get('id')
