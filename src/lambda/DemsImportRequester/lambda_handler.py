@@ -26,7 +26,7 @@ class Constants:
     HTTP_ERROR_CODE = 400
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
     FIRST_ATTEMPT_COUNT = 1
-    SQS_DELAY_TIMEOUT_SECS = 900 # 15 mins in seconds
+    
 
 class DemsImportRequester:
     """Main class to call the EDT create-load-file-import API to initiate "import" of evidence within EDT's S3 bucket to the particular, relevant target DEMS case"""
@@ -398,7 +398,7 @@ class DemsImportRequester:
             response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-                DelaySeconds=Constants.SQS_DELAY_TIMEOUT_SECS,
+               
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=message_attributes
@@ -441,7 +441,7 @@ class DemsImportRequester:
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-                DelaySeconds=Constants.SQS_DELAY_TIMEOUT_SECS,
+               
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=early_notif_message_attributes
@@ -477,7 +477,7 @@ class DemsImportRequester:
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-                DelaySeconds=Constants.SQS_DELAY_TIMEOUT_SECS,
+               
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=case_found_msg_attrs
