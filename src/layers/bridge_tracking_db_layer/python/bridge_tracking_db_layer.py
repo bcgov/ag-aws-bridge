@@ -408,7 +408,7 @@ class DatabaseManager:
         query = "SELECT * FROM evidence_transfer_jobs WHERE job_id = %s"
         return self.execute_query_one(query, (job_id,))
     
-    def update_job_status(self, job_id: str, status_code: int, job_msg: str = None, 
+    def update_job_status(self, job_id: str, status_code: int, retry_count:int=0, job_msg: str = None, 
                      last_modified_process: str = None, agency_id_code: str = None, 
                      agency_file_number: str = None) -> Dict:
         """
@@ -445,7 +445,10 @@ class DatabaseManager:
         if agency_file_number is not None:
             updates.append("agency_file_number = %s")
             params.append(agency_file_number)
-        
+        if retry_count is not None:
+            updates.append("retry_count = %s")
+            params.append(retry_count)
+            
         params.append(job_id)
         
         query = f"""
@@ -1052,7 +1055,7 @@ def create_evidence_transfer_job(job_data: Dict[str, Any]) -> Dict:
 def get_evidence_transfer_job(job_id: str) -> Optional[Dict]:
     return get_db_manager().get_evidence_transfer_job(job_id)
 
-def update_job_status(job_id: str, status_code: int, agency_id_code:str, agency_file_number:str,job_msg: str = None, 
+def update_job_status(job_id: str, status_code: int, agency_id_code:str, agency_file_number:str, retry_count:int, job_msg: str = None, 
                      last_modified_process: str = None) -> Dict:
     return get_db_manager().update_job_status(job_id, status_code, agency_id_code, agency_file_number, job_msg, last_modified_process)
 
