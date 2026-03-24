@@ -465,13 +465,7 @@ def process_no_case_found(self , job_id:str, rms_jur_id:str, agency_id_code:str,
                     job_id=job_id,
                     custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num, "agency_id_code" : agency_id_code}
                 )
-          # end of attempts, delete the message
-       # queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
-       # self.sqs_client.delete_message(
-        #            QueueUrl=queue_url,
-        #            ReceiptHandle=message_handle
-        #        )
-        #self.logger.info(f"Deleted message: {message_handle}")
+        
         message_attributes = {
             "attempt_number"        : retry_count,
             "first_attempt_time"    : first_attempt_time,
