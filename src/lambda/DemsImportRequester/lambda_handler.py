@@ -26,6 +26,9 @@ class Constants:
     HTTP_ERROR_CODE = 400
     IMPORT_REQUESTED= "IMPORT-REQUESTED"
     FIRST_ATTEMPT_COUNT = 1
+    QUEUE_DEMS_IMPORT_STATUS = "q-dems-import-status.fifo"
+    QUEUE_TRANSFER_EXCEPTION = "q-transfer-exception-early-notify.fifo"
+
     
 
 class DemsImportRequester:
@@ -150,8 +153,9 @@ class DemsImportRequester:
             "first_attempt_time" : first_attempt_time,
             "last_attempt_time"  : last_attempt_time,
             "attempt_number"     : attempt_number
-        }
+            }
 
+        
         missing = [k for k, v in required.items() if not v]
         if missing:
             
@@ -469,10 +473,10 @@ class DemsImportRequester:
                 self.logger.log_error(event="SQS Message Send Failed", error=str(e), job_id=self.job_id)
            
             try:
-                #send sqs to q-case-found
+                #send sqs to q-dems-import-retry
                 random_string = ''.join(random.choices(alphanumeric_chars, k=20))
                 # send sqs to transfer exception early notify
-                queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
+                queue_url = self.sqs_client.get_queue_url(QueueName="q-dems-import-retry.fifo")['QueueUrl']
                
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
@@ -491,12 +495,25 @@ class DemsImportRequester:
             except Exception as send_case_found_ex:
                 self.logger.log_error(event="SQS Message Send Failed", error=str(send_case_found_ex), job_id=self.job_id)
 
+    def get_sqs_queue_calling(self, original_arn:str)->str:
+
+        if not original_arn:
+            return ""
+        # arn:aws:sqs:region:account-id:queue-name
+        parts = original_arn.split(':')
+        region = parts[3]
+        account_id = parts[4]
+        queue_name_only = parts[5]
+
+        return queue_name_only
         
-    def process_message(self, message: dict):
+    def process_message(self, message: dict, queue_name:str):
         """Process a single SQS message."""
         try:
             #self.parse_message_attributes(message)
 
+            # grab the name of the sqs queue
+           
             job_id = ""
             dems_case_id=""
             destinationPath=""
@@ -507,6 +524,7 @@ class DemsImportRequester:
             last_attempt_time = ""
             receipt_handle = message['receiptHandle']
             messageId = message["messageId"]
+            sourceCaseTitle = ""
             try:
                 job_id, sourcePath, dems_case_id,destinationPath, first_attempt_time, last_attempt_time, attempt_number = self.parse_message_attributes(message)
                  
@@ -612,8 +630,9 @@ def lambda_handler(event, context):
 
         for record in event["Records"]:
             attrs = record.get('messageAttributes', {})
-            
-           
+            queue_arn = record['eventSourceARN']
+            queue_name = requester.get_sqs_queue_calling(queue_arn)
+
             # Helper to safely extract string value
             def get_value(key):
                 attr = attrs.get(key)
@@ -652,7 +671,7 @@ def lambda_handler(event, context):
             )
 
             # Pass the full record (or just the values) to your processor
-            requester.process_message(record)
+            requester.process_message(record, queue_name)
 
         logger.log_success(
             event="Dems Import Requester End",
