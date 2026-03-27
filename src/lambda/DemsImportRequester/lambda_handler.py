@@ -8,7 +8,7 @@ import time
 import botocore.exceptions
 import random
 import string
-
+import traceback
 from datetime import datetime,timezone
 from botocore.config import Config
 
@@ -71,7 +71,9 @@ class DemsImportRequester:
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import',
             f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status',
             f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries',
-            f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify'
+            f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify',
+            f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-retry',
+            
         ]
         
         try:
@@ -171,10 +173,10 @@ class DemsImportRequester:
         try:
             api_url = self.parameters[f'/{self.env_stage}/edt/api/import_url']
             api_url = api_url.replace("$$$$", dems_case_id)
-           
+            bearer = self.parameters[f'/{self.env_stage}/edt/api/bearer']
             headers = {
-            'Authorization': f"Bearer {self.parameters[f'/{self.env_stage}/edt/api/bearer']}",
-            "Accept" : "application/json"
+            'Authorization': f'Bearer {bearer}',
+            'Content-Type': 'application/json'
            
             }
             now = datetime.now()
@@ -185,16 +187,21 @@ class DemsImportRequester:
                 "importName": importName,
                 "loadFilePath": imagePath,
                 "importTemplate": template
-            }  
+            } 
+           
+            api_response = None 
             try:
                 start_time = time.perf_counter()
-                api_response = self.http.request('POST', api_url, headers=headers, body=body)
+               
+                api_response = self.http.request('POST', api_url, headers=headers, body=json.dumps(body))
+                
                 response_time = time.perf_counter() - start_time
             except (MaxRetryError, NewConnectionError, TimeoutError) as e:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"EDT API call failed, Exception: {str(e)}"))
+                
                 return None
-
-            if api_response.status < Constants.HTTP_ERROR_CODE:
+           
+            if api_response.status < int(Constants.HTTP_ERROR_CODE):
 
                 self.logger.log_api_call(
                 event="DEMS EDT create Import Report API call",
@@ -209,63 +216,85 @@ class DemsImportRequester:
                     json_data = api_response.json()
                     import_id =  json_data.get("importId")
                 except ValueError as e:
+                    
                     self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Failed to parse JSON response: {str(e)}"))
                     raise
-            elif api_response.status >= Constants.HTTP_ERROR_CODE:
-                if max_attempt_count > attempt_number:
-                    queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status']
-                    current_timestamp = datetime.now()
-                    attempt_number = attempt_number +1
-                    
-                    self.sqs_client.delete_message(
-                    QueueUrl=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'],
-                    ReceiptHandle=message_handle
-                    )
-                    self.logger.info(f"Deleted message: {message_handle}")
+            elif api_response.status >= int(Constants.HTTP_ERROR_CODE):
 
-                    self.send_sqs_message(queue_url, job_id, first_attempt_time, last_attempt_time,attempt_number,dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath="",
-                                           current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"), importName=importName)
-                    
-                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
-                   
-                elif max_attempt_count == attempt_number:
-                    queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception']
+                if attempt_number == int(Constants.FIRST_ATTEMPT_COUNT):
                     current_timestamp = datetime.now()
-                    job_msg = "dems import request failed; maximum attempts"
-
-                    self.process_exception_message(job_id, message_handle,job_msg,source_queue_url=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'])
-                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Import attempt max count exceeded."))
-                    return None
-                elif attempt_number == Constants.FIRST_ATTEMPT_COUNT:
+                    
                     job_msg = 'initial dems import failed. retrying'
                     evidence_file = self.db_manager.get_evidence_transfer_job(job_id)
                     source_case_title = ""
                     if evidence_file:
                         source_case_title = evidence_file['source_case_title']
                         
-                    self.update_job_status(job_id=job_id,job_msg="initial dems import failed. retrying")
+                    self.update_job_status(job_id=job_id,status_value=None, agency_id_code=None, agency_file_number=None, job_msg="initial dems import failed. retrying")
                    
                     sqs_msg_attributes_early_notif = {
                         'job_id': {'DataType': 'String', 'StringValue': job_id},
                         'source_case_title' : {'DataType': 'String', 'StringValue': source_case_title},
-                        'JobStatusCodeId ' : {'DataType': 'String', 'StringValue': '83.5'},
+                        'JobStatusCodeId' : {'DataType': 'String', 'StringValue': '83.5'},
 
                     }
-
+                    int_attempt_number = int(attempt_number)
                     sqs_msg_attributes_case_found = {
-                      
                         'job_id': {'DataType': 'String', 'StringValue': job_id},
                         'source_case_title' : {'DataType': 'String', 'StringValue': source_case_title},
-                         'attempt_number ' : {'DataType': 'String', 'StringValue': '2'},
+                         'attempt_number' : {'DataType': 'String', 'StringValue': str(int_attempt_number + 1)},
                          'first_attempt_time' : {'DataType': 'String', 'StringValue': current_timestamp.strftime("%Y-%m-%d %H:%M:%S")},
                           'last_attempt_time' : {'DataType': 'String', 'StringValue': current_timestamp.strftime("%Y-%m-%d %H:%M:%S")},
 
                     }
-                    self.send_early_attempt_sqs_message(job_id, message_handle=message_handle,early_notif_message_attributes=sqs_msg_attributes_early_notif, case_found_msg_attrs=sqs_msg_attributes_case_found)
-            
+                    try:
+                        self.send_early_attempt_sqs_message(job_id, message_handle,early_notif_message_attributes=sqs_msg_attributes_early_notif, case_found_msg_attrs=sqs_msg_attributes_case_found)
+                    except Exception as e:
+                        print("Error in sending early notification message. Exception : " , e)
+                elif attempt_number < max_attempt_count:
+                    
+                    queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-retry']
+                    current_timestamp = datetime.now()
+                    attempt_number = attempt_number +1
+
+                    self.sqs_client.delete_message(
+                    QueueUrl=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'],
+                    ReceiptHandle=message_handle
+                    )
+                    
+                    self.send_sqs_message(
+                    queue_url=queue_url,
+                    job_id=job_id,
+                    dems_case_id=dems_case_id,
+                    dems_import_job_id=import_id,          # will be None in error path
+                    current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    sourcePath=imagePath,
+                    first_attempt_time=first_attempt_time,
+                    last_attempt_time=last_attempt_time,
+                    attempt_number=attempt_number,         # you already did +1 just above
+                    importName=importName,
+                    destinationPath=destinationPath
+                    )
+
+                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Error in EDT API call. API URL : "  +api_url + " Response status : " + str(api_response.status)))
+                    return None
+                   
+                elif max_attempt_count == attempt_number:
+                    
+                    queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception']
+                    current_timestamp = datetime.now()
+                    job_msg = "dems import request failed; maximum attempts"
+
+                    self.process_exception_message(job_id, message_handle,job_msg,source_queue_url=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'])
+                    self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception(f"Import attempt max count exceeded."))
+                    
+                    return None
+                
             if not json_data:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
-                return
+                
+                return None
+            
             return import_id
 
         except botocore.exceptions.ClientError  as e:
@@ -294,7 +323,7 @@ class DemsImportRequester:
                     QueueUrl=source_queue_url,
                     ReceiptHandle=message_handle
                 )
-        self.logger.info(f"Deleted message: {message_handle}")
+        self.logger.log(f"Deleted message: {message_handle}")
         message_attributes = {
             "job_id"                        : job_id,
             "source_case_title"             : source_case_title,
@@ -364,16 +393,16 @@ class DemsImportRequester:
                         self.logger.log_error(event="Evidence File update Failed", error=str(e), job_id=self.job_id)
 
     def send_sqs_message(self, queue_url: str, job_id: str, dems_case_id: str, dems_import_job_id:str,
-                         current_timestamp: str,sourcePath:str,first_attempt_time:str, last_attempt_time:str,attempt_number:int, custom_exception: Exception = None, importName:str=None):
+                         current_timestamp: str,sourcePath:str,first_attempt_time:str, last_attempt_time:str,attempt_number:int, custom_exception: Exception = None, importName:str=None, destinationPath:str=None)->bool:
         """Send message to SQS queue."""
         # Define the alphanumeric character pool
         alphanumeric_chars = string.ascii_letters + string.digits
 
         # Generate a random string of 20 characters
         random_string = ''.join(random.choices(alphanumeric_chars, k=20))
+        
         attempt_number = attempt_number + 1
         try:
-           
             self.logger.log(event="calling SQS to add msg", status=LogStatus.IN_PROGRESS, message="Trying to call SQS ...")
             if importName is None:
                 message_attributes = {
@@ -383,7 +412,8 @@ class DemsImportRequester:
                 'source_path' : {'DataType': 'String', 'StringValue': sourcePath },
                 'first_attempt_time' : {'DataType': 'String', 'StringValue': first_attempt_time},
                 'last_attempt_time' : {'DataType' : 'String', 'StringValue' : last_attempt_time},
-                'attempt_number' : {'DataType' : 'String', 'StringValue' : str(attempt_number)}
+                'attempt_number' : {'DataType' : 'String', 'StringValue' : str(attempt_number)},
+                'destination_path' : {'DataType' : 'String', 'StringValue' : destinationPath}
                 }
             elif importName :
                  message_attributes = {
@@ -427,8 +457,10 @@ class DemsImportRequester:
                     }
                 }
             )
+            return True
         except Exception as e:
             self.logger.log_error(event="SQS Message Send Failed", error=str(e), job_id=self.job_id)
+            raise
 
     def send_early_attempt_sqs_message(self,  job_id: str, message_handle, early_notif_message_attributes:dict, case_found_msg_attrs:dict):
             """Send message to SQS queue."""
@@ -437,11 +469,14 @@ class DemsImportRequester:
 
             # Generate a random string of 20 characters
             random_string = ''.join(random.choices(alphanumeric_chars, k=20))
+            
             try:
                 # send sqs to transfer exception early notify
                 queue_url = self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify']
+
+                #https://sqs.ca-central-1.amazonaws.com/731386536779/q-transfer-exception-early-notify.fifo
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
-               
+                
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
@@ -477,7 +512,7 @@ class DemsImportRequester:
                 random_string = ''.join(random.choices(alphanumeric_chars, k=20))
                 # send sqs to transfer exception early notify
                 queue_url = self.sqs_client.get_queue_url(QueueName="q-dems-import-retry.fifo")['QueueUrl']
-               
+                
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
@@ -491,7 +526,26 @@ class DemsImportRequester:
                     QueueUrl=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'],
                     ReceiptHandle=message_handle
                     )
-                self.logger.info(f"Deleted message: {message_handle}")
+                
+                self.logger.log_sqs_message_sent(
+                queue_url=queue_url,
+                message_id=response,
+                response_time_ms=1,
+                message_body={
+                    "timestamp": current_timestamp,
+                    "level": "INFO",
+                    "function": Constants.PROCESS_NAME,
+                    "event": "SQSMessageQueued",
+                    "message": "Queued message for DEMS Import Retry Requester",
+                    "job_id": job_id,
+                    "dems_import_job_id": '',
+                    "additional_info": {
+                        "target_queue": queue_url,
+                        "message_group_id": job_id,
+                        "deduplication_id": "file-" + random_string
+                    }
+                }
+                )
             except Exception as send_case_found_ex:
                 self.logger.log_error(event="SQS Message Send Failed", error=str(send_case_found_ex), job_id=self.job_id)
 
@@ -551,8 +605,10 @@ class DemsImportRequester:
             
             try:
                 import_id = self.callEDTDemsApi(destinationPath, first_attempt_time, last_attempt_time, attempt_number,job_id, dems_case_id=dems_case_id, imagePath=sourcePath,message_handle=receipt_handle )
+                 
             except Exception as mImportIdEx:
-                 self.logger.log(
+              
+                self.logger.log(
                     event="EDT Dems Import Requester",
                     status=Constants.ERROR,
                     message="API called but no import_id returned",
@@ -581,8 +637,18 @@ class DemsImportRequester:
                 if import_id:
                     queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-status']
                     current_timestamp = datetime.now()
-                    self.send_sqs_message(queue_url, job_id, first_attempt_time, last_attempt_time,attempt_number,dems_case_id=dems_case_id, dems_import_job_id=import_id, sourcePath=sourcePath,
-                                           current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                    self.send_sqs_message(
+                    queue_url=queue_url,
+                    job_id=job_id,
+                    dems_case_id=dems_case_id,
+                    dems_import_job_id=import_id,
+                    current_timestamp=current_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    sourcePath=sourcePath,
+                    first_attempt_time=first_attempt_time,
+                    last_attempt_time=last_attempt_time,
+                    attempt_number=attempt_number,
+                    destinationPath=destinationPath
+                    )
             except Exception as sqs_exception:
                 self.logger.log_error(event="SQS Message Sending Failed", error=str(msg_err), job_id=self.job_id)
                 return
