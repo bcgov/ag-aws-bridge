@@ -38,6 +38,7 @@ def get_ssm_parameters(
         "transfer_exception_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-transfer-exception",
         "transfer_completion_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-axon-transfer-completion",
         "import_status_retries_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-dems-import-status",
+        "import_status_retries_retry_queue_url": f"/{env_stage}/bridge/sqs-queues/url_q-dems-import-status-retry",
         "max_retries": f"/{env_stage}/bridge/sqs-queues/lambda-dems-import-status-retries",
     }
 
@@ -1153,9 +1154,9 @@ def handle_import_in_progress(
     3. Set MessageDeduplicationId appropriately
     """
     next_attempt = attempt_number + 1
-    retries_queue_url = ssm_parameters.get("import_status_retries_queue_url")
+    retries_queue_url = ssm_parameters.get("import_status_retries_retry_queue_url")
     if not retries_queue_url:
-        raise ValueError("Missing SSM parameter: import_status_retries_queue_url")
+        raise ValueError("Missing SSM parameter: import_status_retries_retry_queue_url")
 
     logger.log(
         event=event,
@@ -1169,7 +1170,7 @@ def handle_import_in_progress(
             "current_attempt": attempt_number,
             "next_attempt": next_attempt,
             "queue_url": retries_queue_url,
-            "message": "Retrying import status check by re-queueing message",
+            "message": "Retrying import status check by re-queueing message to retry queue with 900s delay",
         },
     )
 

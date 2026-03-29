@@ -210,10 +210,16 @@ Resources:
         - x86_64
       Timeout: 60
       Events:
-        SQSEvent:
+        MainQueueEvent:
           Type: SQS
           Properties:
             Queue: arn:aws:sqs:ca-central-1:731386536779:q-dems-import-status.fifo
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+        RetryQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-dems-import-status-retry.fifo
             BatchSize: 1
             MaximumBatchingWindowInSeconds: 0
       Layers:
