@@ -198,6 +198,46 @@ Resources:
           - subnet-0e84012379d304b04
           - subnet-072de875489645b47
 
+  DemsImportStatusPollerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-DemsImportStatusPollerFunction"
+      Role: arn:aws:iam::731386536779:role/bridge-dems-import-status-role
+      CodeUri: src/lambdas/dems-import-status-poller
+      Handler: app/app.lambda_handler
+      Runtime: python3.11
+      Architectures:
+        - x86_64
+      Timeout: 60
+      Events:
+        MainQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-dems-import-status.fifo
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+        RetryQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:ca-central-1:731386536779:q-dems-import-status-retry.fifo
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+      Layers:
+        - !Ref LambdaStructuredLoggerLayer
+        - !Ref BridgeTrackingDbLayer
+      Environment:
+        Variables:
+          ENV_STAGE: !Ref Environment
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-048a4f967f32fc802
+          - sg-0f18545644fd98e9a
+          - sg-0143abb3cd912ef17
+          - sg-0e95635bffdfa0c34
+        SubnetIds:
+          - subnet-0e84012379d304b04
+          - subnet-072de875489645b47
+
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
     Properties:
@@ -245,6 +285,12 @@ Outputs:
     Value: !GetAtt AxonEvidenceDataTransferorFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-AxonEvidenceDataTransferorFunction"
+
+  DemsImportStatusPollerFunction:
+    Description: DEMS Import Status Poller Lambda Function ARN
+    Value: !GetAtt DemsImportStatusPollerFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-DemsImportStatusPollerFunction"
 
   ScheduleExpression:
     Description: Schedule expression for token refresh
