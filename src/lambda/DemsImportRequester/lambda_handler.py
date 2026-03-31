@@ -18,6 +18,7 @@ from bridge_tracking_db_layer import DatabaseManager, StatusCodes, get_db_manage
 
 class Constants:
     IN_PROGRESS = "IN_PROGRESS"
+    IMPORT_FAILED = "IMPORT_FAILED"
     ERROR = "ERROR",
     PROCESS_NAME = "demsImportRequester"
     REGION_NAME = "ca-central-1"
@@ -28,8 +29,6 @@ class Constants:
     FIRST_ATTEMPT_COUNT = 1
     QUEUE_DEMS_IMPORT_STATUS = "q-dems-import-status.fifo"
     QUEUE_TRANSFER_EXCEPTION = "q-transfer-exception-early-notify.fifo"
-
-    
 
 class DemsImportRequester:
     """Main class to call the EDT create-load-file-import API to initiate "import" of evidence within EDT's S3 bucket to the particular, relevant target DEMS case"""
@@ -167,7 +166,7 @@ class DemsImportRequester:
         #job_id, sourcePath, dems_case_id,destinationPath, first_attempt_time, last_attempt_time, attempt_number
         return job_id, sourcePath, dems_case_id, destinationPath, first_attempt_time, last_attempt_time,attempt_number_int
 
-    def callEDTDemsApi( self, destinationPath:str, first_attempt_time:str, last_attempt_time:str, attempt_number:int,job_id, dems_case_id, imagePath, message_handle)->str:
+    def callEDTDemsApi( self, destinationPath:str, first_attempt_time:str, last_attempt_time:str, attempt_number:int,job_id:str, dems_case_id:str, imagePath:str, message_handle)->str:
         import_id = None
         max_attempt_count = int(self.parameters[f'/{self.env_stage}/bridge/sqs-queues/lambda-dems-import-requestor-retries'])
         try:
@@ -177,7 +176,6 @@ class DemsImportRequester:
             headers = {
             'Authorization': f'Bearer {bearer}',
             'Content-Type': 'application/json'
-           
             }
             now = datetime.now()
 
@@ -192,7 +190,6 @@ class DemsImportRequester:
             api_response = None 
             try:
                 start_time = time.perf_counter()
-               
                 api_response = self.http.request('POST', api_url, headers=headers, body=json.dumps(body))
                 
                 response_time = time.perf_counter() - start_time
@@ -225,13 +222,22 @@ class DemsImportRequester:
                     current_timestamp = datetime.now()
                     
                     job_msg = 'initial dems import failed. retrying'
-                    evidence_file = self.db_manager.get_evidence_transfer_job(job_id)
+                    print("job id : ", job_id)
+                    evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
                     source_case_title = ""
-                    if evidence_file:
-                        source_case_title = evidence_file['source_case_title']
-                        
+                    if evidence_transfer_job:
+                        source_case_title = evidence_transfer_job['source_case_title']
+                        print("found evidence transfer job 1")
+                        print ("source case title found : ", source_case_title)
+                    else:
+                        print("evidence transfer job not found")
+                    
                     self.update_job_status(job_id=job_id,status_value=None, agency_id_code=None, agency_file_number=None, job_msg="initial dems import failed. retrying")
-                   
+                    self.logger.log_error(
+                    event="Processing EDT Call failed, first attempt, retrying...",
+                    error=Exception("Error retrieving EDT data "),
+                    job_id=job_id
+                    )
                     sqs_msg_attributes_early_notif = {
                         'job_id': {'DataType': 'String', 'StringValue': job_id},
                         'source_case_title' : {'DataType': 'String', 'StringValue': source_case_title},
@@ -245,6 +251,10 @@ class DemsImportRequester:
                          'attempt_number' : {'DataType': 'String', 'StringValue': str(int_attempt_number + 1)},
                          'first_attempt_time' : {'DataType': 'String', 'StringValue': current_timestamp.strftime("%Y-%m-%d %H:%M:%S")},
                           'last_attempt_time' : {'DataType': 'String', 'StringValue': current_timestamp.strftime("%Y-%m-%d %H:%M:%S")},
+                          'source_path' : {'DataType': 'String', 'StringValue': imagePath},
+                          'destination_path' : {'DataType': 'String', 'StringValue': destinationPath},
+                           'dems_case_id' : {'DataType': 'String', 'StringValue': dems_case_id},
+
 
                     }
                     try:
@@ -256,6 +266,12 @@ class DemsImportRequester:
                     queue_url = self.parameters[f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import-retry']
                     current_timestamp = datetime.now()
                     attempt_number = attempt_number +1
+
+                    self.logger.log_error(
+                    event="Processing EDT Call failed, attempt number between 2 & 5",
+                    error=Exception("Error retrieving EDT data "),
+                    job_id=job_id
+                    )
 
                     self.sqs_client.delete_message(
                     QueueUrl=self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-dems-import'],
@@ -292,7 +308,6 @@ class DemsImportRequester:
                 
             if not json_data:
                 self.logger.log_error(event=Constants.PROCESS_NAME, error=Exception("No data returned"))
-                
                 return None
             
             return import_id
@@ -306,7 +321,7 @@ class DemsImportRequester:
                 raise
    
     def process_exception_message(self, job_id:str, message_handle:str, source_case_title:str, job_msg:str, source_queue_url:str )->bool:
-        status_code = "IMPORT_FAILED"
+        status_code = Constants.IMPORT_FAILED
 
         self.update_job_status(job_id,status_code, None, None,job_msg)
         current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
@@ -473,18 +488,17 @@ class DemsImportRequester:
             try:
                 # send sqs to transfer exception early notify
                 queue_url = self.parameters[ f'/{self.env_stage}/bridge/sqs-queues/url_q-transfer-exception-early-notify']
-
-                #https://sqs.ca-central-1.amazonaws.com/731386536779/q-transfer-exception-early-notify.fifo
+               
                 current_timestamp = datetime.now(timezone.utc).isoformat(timespec='milliseconds')
                 
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-               
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=early_notif_message_attributes
                 )
+
                 self.logger.log_sqs_message_sent(
                 queue_url=queue_url,
                 message_id=response,
@@ -516,7 +530,6 @@ class DemsImportRequester:
                 response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_url,
-               
                 MessageGroupId="dems-import-requested",
                 MessageDeduplicationId=random_string,
                 MessageAttributes=case_found_msg_attrs
