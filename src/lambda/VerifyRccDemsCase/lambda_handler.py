@@ -22,10 +22,6 @@ class Constants:
     HTTP_OK = 200
     HTTP_BAD_REQUEST = 400,
     EARLY_NOTIFICATION_ATTEMPT_COUNT = 1
-    SQS_SEND_DELAY_SECS = 900 # 15 mins
-
-
-
 
 class DemsCaseValidator:
     """Main class encapsulating the DEMS case validation logic for Lambda processing."""
@@ -294,7 +290,7 @@ class DemsCaseValidator:
                 }
             # Add case_title to message attributes if case_title is not None
             if case_title is not None and message_attributes is not None:
-                message_attributes['case_title'] = {
+                message_attributes['source_case_title'] = {
                     'DataType': 'String',
                     'StringValue': case_title[:256],  # Ensure case_title adheres to SQS 256-byte limit
                 }
@@ -302,7 +298,7 @@ class DemsCaseValidator:
             response = self.sqs_client.send_message(
                 QueueUrl=queue_url,
                 MessageBody='Sending SQS message to ' + queue_name,
-                DelaySeconds=Constants.SQS_SEND_DELAY_SECS,
+               
                 MessageGroupId="axon-evidence-transfer",
                 MessageDeduplicationId=job_id,
                 MessageAttributes=message_attributes
@@ -469,20 +465,14 @@ def process_no_case_found(self , job_id:str, rms_jur_id:str, agency_id_code:str,
                     job_id=job_id,
                     custom_metadata={"rms_jur_id": rms_jur_id, "agencyFileNumber": agency_file_num, "agency_id_code" : agency_id_code}
                 )
-          # end of attempts, delete the message
-        queue_url = self.sqs_client.get_queue_url(QueueName="q-case-found.fifo")['QueueUrl']
-        self.sqs_client.delete_message(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=message_handle
-                )
-        self.logger.info(f"Deleted message: {message_handle}")
+        
         message_attributes = {
             "attempt_number"        : retry_count,
             "first_attempt_time"    : first_attempt_time,
             "last_attempt_time"     : current_timestamp
 
         }
-        self.send_sqs_message('q-axon-case-found.fifo', job_id, case_title=source_case_title, current_timestamp=current_timestamp, message_attributes=message_attributes)
+        self.send_sqs_message('q-case-cound-retry.fifo', job_id, case_title=source_case_title, current_timestamp=current_timestamp, message_attributes=message_attributes)
 
 def process_exception_message(self, job_id:str, rms_jur_id:str, agency_id_code:str,agency_file_num:str,message_handle:str, source_case_title:str )->bool:
     status_code = "INVALID-AGENCY-IDENTIFIER"
