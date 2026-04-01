@@ -1,3 +1,4 @@
+from decimal import Decimal
 import json
 from typing import Dict, List, Optional, Tuple
 import boto3
@@ -55,6 +56,10 @@ class TransferNotifierCleanup:
             self.logger = logger
             self.job_id = job_id
             self.ssm_client, self.sqs_client, self.agency_code_table, self.notification_matrix_table, self.eventbridge = self._initialize_aws_clients()
+            if self.notification_matrix_table:
+                 print("matrix table exists")
+            else:
+                 print("matrix table not found")
             self.db_manager = get_db_manager(env_param_in=env_stage)
             self.db_manager._initialize_pool()
             self.http = self._initialize_http_pool()
@@ -70,6 +75,7 @@ class TransferNotifierCleanup:
             boto3.resource("dynamodb", region_name=Constants.REGION_NAME).Table(Constants.NOTIFICATION_MATRIX_TABLE),
             boto3.client('events',region_name=Constants.REGION_NAME)
         )
+    
 
     def _initialize_http_pool(self) -> urllib3.PoolManager:
         """Initialize HTTP connection pool with retries and timeout."""
@@ -108,7 +114,8 @@ class TransferNotifierCleanup:
             f'/{self.env_stage}/bridge/s3_retention/rejected',
             f'/{self.env_stage}/axon/api/categoryId/transferredIssues',
             f'/{self.env_stage}/bridge/s3_retention/transferredIssues',
-            f'/{self.env_stage}/bridge/sqs-queues/url_q-axon-evidence-category-update'
+            f'/{self.env_stage}/bridge/sqs-queues/url_q-axon-evidence-category-update',
+            f'/{self.env_stage}/bridge/notifications/from_address'
             ]
         
         try:
@@ -720,19 +727,18 @@ class TransferNotifierCleanup:
     def notify_first_exception_failure(self, job_id:str,message:dict)-> dict:
            """When a transfer encounters an exception of a specific type that can be retried thereafter (such as when a DEMS case is not yet created), distribute an initial notice"""
            attrs = message.get('messageAttributes', {})
+          
            JobStatusCodeId  = attrs['JobStatusCodeId']['stringValue']
-           self.logger.log_start(event="Processing transfer first exception sqs", job_id=job_id)
-           dynamo_response = self.notification_matrix.get_item(Key={'JobStatusCodeId': JobStatusCodeId})
+           
+           if self.notification_matrix_table:
+            self.logger.log_start(event="Processing transfer first exception sqs", job_id=job_id)
+          
+            dynamo_response = self.notification_matrix_table.get_item(Key={'JobStatusCodeId': Decimal(JobStatusCodeId)})
+
            receipt_handle = message['receiptHandle']
            messageId = message["messageId"]
            source_email_address = self.parameters[f'/{self.env_stage}/bridge/notifications/from_address']
            try:
-                job_id = self.get_attr('job_id',attrs)
-                evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
-                attrs = message.get('messageAttributes', {})
-                destinationEmails = []
-                job_msg = evidence_transfer_job['job_msg']
-                
                 if not job_id:
                     self.logger.log_error(
                     event="Retrieving Job Id failed",
@@ -743,6 +749,10 @@ class TransferNotifierCleanup:
                     )
                     return  # Abort processing early
                 
+                evidence_transfer_job = self.db_manager.get_evidence_transfer_job(job_id)
+                attrs = message.get('messageAttributes', {})
+                destinationEmails = []
+             
                 if dynamo_response:
                         item = dynamo_response.get('Item')
                         if item :
@@ -754,7 +764,6 @@ class TransferNotifierCleanup:
                                  if evidence_transfer_job:
                                      body_text = body_text.replace('{{source-case-title}}', evidence_transfer_job['source_case_title'])
                                      body_text = body_text.replace('{{shared-on}}', evidence_transfer_job['source_case_last_modified_utc'])
-                                   
                                      agency_code = evidence_transfer_job["bcpsAgencyIdCode"]
 
                             tenant_id = self.parameters[f'/{self.env_stage}/bridge/notifications/azure_email_tenant']
@@ -772,9 +781,6 @@ class TransferNotifierCleanup:
            except Exception as msg_err:
                 self.logger.log_error(event="Sending Processing Failed", error=str(msg_err), job_id=self.job_id)
                 raise
-            
-                     
-
 
     def create_sqs_message(self, job_id: str, queue_url:str, source_case_id: str, body_json:str, messageGroupId:str, messageDeDupId:str) -> Dict:
         """Create a properly formatted SQS message for evidence download."""
@@ -975,6 +981,12 @@ def lambda_handler(event, context):
                 queue_name = notifier.get_sqs_queue_calling(queue_arn)
                 job_id = ""
                 transfer_return = {}
+                job_id = None
+
+                if 'job_id' in attrs:
+                    attr = attrs['job_id']
+                    job_id = attr['stringValue'] if attr['dataType'] == 'String' else attr.get('binaryValue')
+                    
                 if queue_name == Constants.CASE_SHARE_RECEIVED_SQS:
                     transfer_return = notifier.process_case_share_received(record)
                 
