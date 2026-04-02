@@ -28,7 +28,7 @@ CREATE TABLE evidence_transfer_jobs (
     last_modified_process VARCHAR(100),
     last_modified_utc TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     retry_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 3,
+    max_retries INTEGER DEFAULT 3
 );
 
 CREATE TABLE evidence_files (
@@ -58,8 +58,11 @@ CREATE TABLE evidence_files (
 	bridge_s3_cleanup_completed BOOLEAN,
 	bridge_s3_cleanup_completed_date TIMESTAMP,
 	axon_evidence_category_id INTEGER,
-	axon_evidence_category_change_date TIMESTAMP.
-	evidence_file_name VARCHAR(255)
+	axon_evidence_category_change_date TIMESTAMP,
+	evidence_file_name VARCHAR(255),
+	agency_id_code varchar(20) DEFAULT '' NOT NULL ,
+	agency_file_number varchar(255) DEFAULT '' NOT NULL,
+	evidence_id_source varchar(255) DEFAULT '' NOT NULL
 );
 
 -- =====================================================
@@ -106,6 +109,7 @@ INSERT INTO status_codes VALUES
 (15, 'PENDING', 15, 'Pending downloading and processing', 'FILE'),
 (20, 'VALID-CASE', 20, 'Case information validated and matched', 'JOB'),
 (21, 'INVALID-CASE', 21, 'Case information not valid or matched', 'JOB'),
+(22, 'INVALID-AGENCY-IDENTIFIER', 22, 'Axon case title does not match BCPS agency listing', 'JOB'),
 
 -- Download preparation
 (30, 'DOWNLOAD-READY', 30, 'Ready for download', 'BOTH'),
@@ -131,7 +135,8 @@ INSERT INTO status_codes VALUES
 (82, 'IMPORTED', 82, 'Successfully imported', 'BOTH'),
 (83, 'IMPORT-FAILED', 83, 'Import failed', 'BOTH'),
 (84, 'IMPORTED-WITH-ERRORS', 140,'Import completed with errors or warnings','BOTH'),
-(22, 'INVALID-AGENCY-IDENTIFIER', '22', 'Axon case title does not match BCPS agency listing', 'JOB');
+(22, 'INVALID-AGENCY-IDENTIFIER', '22', 'Axon case title does not match BCPS agency listing', 'JOB'),
+
 
 -- Final states
 (100, 'COMPLETED', 100, 'Processing completed successfully', 'BOTH'),
