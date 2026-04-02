@@ -28,7 +28,9 @@ CREATE TABLE evidence_transfer_jobs (
     last_modified_process VARCHAR(100),
     last_modified_utc TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     retry_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 3
+    max_retries INTEGER DEFAULT 3,
+	agency_id_code varchar(20) DEFAULT '' NOT NULL ,
+	agency_file_number varchar(255) DEFAULT '' NOT NULL
 );
 
 CREATE TABLE evidence_files (
